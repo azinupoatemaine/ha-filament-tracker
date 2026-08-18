@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import re
+import time
 
 import voluptuous as vol
 from aiohttp import web
@@ -253,12 +254,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _threshold() -> float:
         return float(entry.options.get(OPT_LOW_STOCK_THRESHOLD, DEFAULT_LOW_STOCK_THRESHOLD))
 
-    async def _save_and_refresh() -> None:
+    async def _save_and_refresh(label: str) -> None:
         d = hass.data[DOMAIN][entry.entry_id]
+        t0 = time.monotonic()
         await d["store"].async_save({"spools": d["spools"], "mappings": d["mappings"]})
+        t1 = time.monotonic()
         async_dispatcher_send(hass, SIGNAL_SPOOLS_UPDATED)
+        t2 = time.monotonic()
+        _LOGGER.info(
+            "Filament Tracker: %s — disk write %.3fs, dispatch %.3fs, handler total %.3fs",
+            label,
+            t1 - t0,
+            t2 - t1,
+            t2 - t0,
+        )
 
     async def handle_add_spool(call: ServiceCall) -> None:
+        t_start = time.monotonic()
         d = hass.data[DOMAIN][entry.entry_id]
         spools = d["spools"]
         next_id = max([s["id"] for s in spools], default=0) + 1
@@ -273,15 +285,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "status": call.data.get("status") or "Sealed",
             }
         )
-        await _save_and_refresh()
+        await _save_and_refresh("add_spool")
+        _LOGGER.info(
+            "Filament Tracker: add_spool call handler returning after %.3fs (spool id %s)",
+            time.monotonic() - t_start,
+            next_id,
+        )
 
     async def handle_delete_spool(call: ServiceCall) -> None:
+        t_start = time.monotonic()
         d = hass.data[DOMAIN][entry.entry_id]
         d["spools"] = [s for s in d["spools"] if s["id"] != call.data["id"]]
         d["mappings"] = {
             slot: sid for slot, sid in d["mappings"].items() if sid != call.data["id"]
         }
-        await _save_and_refresh()
+        await _save_and_refresh("delete_spool")
+        _LOGGER.info(
+            "Filament Tracker: delete_spool call handler returning after %.3fs",
+            time.monotonic() - t_start,
+        )
 
     async def handle_update_spool(call: ServiceCall) -> None:
         d = hass.data[DOMAIN][entry.entry_id]
@@ -291,7 +313,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     s["weight_remaining"] = max(0.0, call.data["weight_remaining"])
                 if "status" in call.data:
                     s["status"] = call.data["status"]
-        await _save_and_refresh()
+        await _save_and_refresh("update_spool")
 
     async def handle_set_slot_mapping(call: ServiceCall) -> None:
         d = hass.data[DOMAIN][entry.entry_id]
@@ -301,7 +323,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             d["mappings"].pop(slot, None)
         else:
             d["mappings"][slot] = spool_id
-        await _save_and_refresh()
+        await _save_and_refresh("set_slot_mapping")
 
     hass.services.async_register(DOMAIN, SERVICE_ADD_SPOOL, handle_add_spool, schema=ADD_SPOOL_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_DELETE_SPOOL, handle_delete_spool, schema=DELETE_SPOOL_SCHEMA)
@@ -331,7 +353,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         new_remaining = max(0.0, float(spool.get("weight_remaining", 0)) - grams_used)
         spool["weight_remaining"] = round(new_remaining, 1)
-        await _save_and_refresh()
+        await _save_and_refresh("auto_deduct")
         _LOGGER.info(
             "Filament Tracker: deducted %sg from %s (now %sg remaining)",
             grams_used,

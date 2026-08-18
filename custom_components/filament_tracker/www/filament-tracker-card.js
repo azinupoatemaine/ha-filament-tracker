@@ -486,12 +486,18 @@ class FilamentTrackerCard extends HTMLElement {
   // Call a filament_tracker service, then force-fetch the entity's current
   // state directly via REST rather than waiting for the passive hass push.
   async _callServiceAndRefresh(service, data) {
+    const t0 = performance.now();
     try {
       await this._hass.callService("filament_tracker", service, data);
     } catch (e) {
       console.error("filament-tracker-card: service call failed", service, e);
     }
+    const t1 = performance.now();
     await this._forceRefresh();
+    const t2 = performance.now();
+    console.info(
+      `filament-tracker-card: ${service} — callService ${(t1 - t0).toFixed(0)}ms, forceRefresh ${(t2 - t1).toFixed(0)}ms, total ${(t2 - t0).toFixed(0)}ms`
+    );
   }
 
   async _forceRefresh() {
