@@ -91,22 +91,53 @@ def discover_printer_prefixes(hass: HomeAssistant) -> set[str]:
 async def _async_register_frontend(hass: HomeAssistant) -> None:
     """Serve the card JS and register it as a Lovelace resource, once."""
     if hass.data.get(DOMAIN, {}).get("_frontend_registered"):
+        _LOGGER.debug("Filament Tracker: frontend already registered, skipping")
         return
 
     www_dir = pathlib.Path(__file__).parent / "www"
+    js_path = www_dir / CARD_FILENAME
+    if not js_path.exists():
+        _LOGGER.error(
+            "Filament Tracker: card file missing at %s — the www/ folder didn't get "
+            "installed correctly. Reinstalling via HACS (Remove, then re-add) usually fixes this.",
+            js_path,
+        )
+        return
+
+    module_url = f"{CARD_URL_PATH}/{CARD_FILENAME}?v={CARD_VERSION}"
 
     try:
-        from homeassistant.components.http import StaticPathConfig
+        try:
+            from homeassistant.components.http import StaticPathConfig
 
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(CARD_URL_PATH, str(www_dir), True)]
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(CARD_URL_PATH, str(www_dir), True)]
+            )
+            _LOGGER.warning(
+                "Filament Tracker: registered static path %s -> %s (async API)",
+                CARD_URL_PATH,
+                www_dir,
+            )
+        except ImportError:
+            hass.http.register_static_path(CARD_URL_PATH, str(www_dir), cache_headers=True)
+            _LOGGER.warning(
+                "Filament Tracker: registered static path %s -> %s (legacy API)",
+                CARD_URL_PATH,
+                www_dir,
+            )
+
+        from homeassistant.components.frontend import add_extra_js_url
+
+        add_extra_js_url(hass, module_url)
+        _LOGGER.warning("Filament Tracker: registered frontend module %s", module_url)
+    except Exception:
+        _LOGGER.exception(
+            "Filament Tracker: failed to register the card as a frontend resource. "
+            "You can add it manually instead: Settings > Dashboards > Resources > "
+            "Add Resource, URL %s, type JavaScript module.",
+            module_url,
         )
-    except ImportError:
-        hass.http.register_static_path(CARD_URL_PATH, str(www_dir), cache_headers=True)
-
-    from homeassistant.components.frontend import add_extra_js_url
-
-    add_extra_js_url(hass, f"{CARD_URL_PATH}/{CARD_FILENAME}?v={CARD_VERSION}")
+        return
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["_frontend_registered"] = True
