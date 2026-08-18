@@ -1,7 +1,7 @@
 {
   "domain": "filament_tracker",
   "name": "Filament Tracker",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "codeowners": ["@azinupoatemaine"],
   "config_flow": true,
   "dependencies": ["http", "frontend"],

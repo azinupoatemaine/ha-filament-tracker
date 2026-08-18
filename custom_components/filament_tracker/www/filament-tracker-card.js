@@ -201,6 +201,11 @@ class FilamentTrackerCard extends HTMLElement {
         <div class="tray-rack" id="ft-loaded"></div>
       </div>
 
+      <div id="ft-loaded-manual-wrap" hidden>
+        <div class="section-label"><ha-icon icon="mdi:swap-horizontal-bold" style="--mdc-icon-size:14px;"></ha-icon>Încărcat manual (din rezervă)</div>
+        <div class="tray-rack" id="ft-loaded-manual"></div>
+      </div>
+
       <div>
         <div class="section-label"><ha-icon icon="mdi:swap-horizontal" style="--mdc-icon-size:14px;"></ha-icon>Mapare manuală AMS</div>
         <div class="mapping-grid" id="ft-mapping"></div>
@@ -262,6 +267,8 @@ class FilamentTrackerCard extends HTMLElement {
       subtitle: this._card.querySelector("#ft-subtitle"),
       stats: this._card.querySelector("#ft-stats"),
       loaded: this._card.querySelector("#ft-loaded"),
+      loadedManualWrap: this._card.querySelector("#ft-loaded-manual-wrap"),
+      loadedManual: this._card.querySelector("#ft-loaded-manual"),
       mapping: this._card.querySelector("#ft-mapping"),
       addToggle: this._card.querySelector("#ft-add-toggle"),
       addForm: this._card.querySelector("#ft-add-form"),
@@ -297,6 +304,11 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.editorCancel.addEventListener("click", () => this._closeEditor());
     this.$.editorSave.addEventListener("click", () => this._saveEditor());
     this.$.editorDelete.addEventListener("click", () => this._deleteFromEditor());
+
+    this.$.loadedManual.addEventListener("click", (e) => {
+      const tile = e.target.closest(".tray-tile");
+      if (tile && tile.dataset.id) this._openEditor(parseInt(tile.dataset.id, 10));
+    });
 
     this.$.search.addEventListener("input", () => this._renderShelf());
     this.$.sort.addEventListener("change", () => {
@@ -348,6 +360,7 @@ class FilamentTrackerCard extends HTMLElement {
     this._updateStats();
     this._updateLoaded();
     this._updateMapping();
+    this._updateLoadedManual();
     this._renderShelf();
     this._updateEditorLive();
   }
@@ -481,13 +494,65 @@ class FilamentTrackerCard extends HTMLElement {
     });
   }
 
+  // A spool currently mapped to a slot is "in the printer", not "in reserve" —
+  // pull it off the shelf and show it here instead, next to the real AMS trays.
+  _updateLoadedManual() {
+    const attrs = this._spoolsAttr();
+    const mappings = attrs && attrs.mappings ? attrs.mappings : {};
+    const spools = attrs && attrs.spools ? attrs.spools : [];
+    const entries = Object.entries(mappings).filter(([, sid]) => sid != null);
+
+    if (entries.length === 0) {
+      this.$.loadedManualWrap.setAttribute("hidden", "");
+      this.$.loadedManual.innerHTML = "";
+      return;
+    }
+
+    let h = "";
+    entries.forEach(([slotStr, sid]) => {
+      const spool = spools.find((s) => s.id === sid);
+      if (!spool) return;
+      const slotNum = parseInt(slotStr, 10);
+      const slotInfo = this._discoveredSlots && this._discoveredSlots[slotNum - 1];
+      const slotLabel = slotInfo ? slotInfo.label : `Slot ${slotNum}`;
+      const rem = parseFloat(spool.weight_remaining) || 0;
+      const full = parseFloat(spool.weight_full) || 0;
+      const pct = full > 0 ? Math.round((rem / full) * 100) : 0;
+      h += `<div class="tray-tile" data-id="${spool.id}" style="cursor:pointer;" title="Apasă pentru a edita sau demapa">
+        <div class="slot-label">${esc(slotLabel)}</div>
+        <div class="square" style="width:44px;height:44px;background:${esc(spool.color_hex || "#888888")};"></div>
+        <div class="bar" style="width:44px;"><i style="width:${pct}%;background:var(--ft-accent);"></i></div>
+        <div class="mat">${esc(spool.label)}</div>
+      </div>`;
+    });
+
+    if (h === "") {
+      this.$.loadedManualWrap.setAttribute("hidden", "");
+      this.$.loadedManual.innerHTML = "";
+      return;
+    }
+
+    this.$.loadedManualWrap.removeAttribute("hidden");
+    this.$.loadedManual.innerHTML = h;
+  }
+
   _renderShelf() {
     const attrs = this._spoolsAttr();
-    const spools = attrs && attrs.spools ? attrs.spools.filter((s) => s.status !== "Archived") : null;
+    const mappedIds = new Set(
+      attrs && attrs.mappings ? Object.values(attrs.mappings).filter((v) => v != null) : []
+    );
+    const spools = attrs && attrs.spools
+      ? attrs.spools.filter((s) => s.status !== "Archived" && !mappedIds.has(s.id))
+      : null;
 
     if (spools === null) {
       this.$.chips.innerHTML = "";
       this.$.shelf.innerHTML = `<div class="empty-msg">Filament Tracker nu este configurat — adaugă integrarea și restart HA.</div>`;
+      return;
+    }
+    if (spools.length === 0 && mappedIds.size > 0 && (attrs.spools || []).length > 0) {
+      this.$.chips.innerHTML = "";
+      this.$.shelf.innerHTML = `<div class="empty-msg">Toate bobinele sunt încărcate acum — vezi "Încărcat manual" mai sus.</div>`;
       return;
     }
     if (spools.length === 0) {

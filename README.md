@@ -60,9 +60,12 @@ hand-written automation lives inside the integration or the card instead:
 - Live AMS tray tiles, auto-discovered — adapts to however many units/trays you
   actually have, including multiple printers
 - Manual mapping dropdowns for feeding non-RFID refill spools
+- **Mapping a spool to a slot moves it off the shelf** into a small "Loaded manually"
+  strip next to the real AMS trays — the shelf stays "what's in reserve," not "what
+  exists." Unmap it (set the dropdown back to "None") and it returns to the shelf.
 - Add-spool form (collapsed behind a button so the default view stays compact)
-- Click any spool tile to open an inline editor — update remaining weight/status, or
-  delete
+- Click any spool tile — on the shelf or in the loaded strip — to open an inline
+  editor: update remaining weight/status, or delete
 - Search box, sort by material/name/amount, click a material chip to filter
 - Collapsible material groups, ≤10 spools per shelf row with a wood-tone divider
 - Low-stock spools get an amber bar automatically
