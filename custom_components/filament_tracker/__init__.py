@@ -5,7 +5,6 @@ import asyncio
 import logging
 import pathlib
 import re
-import time
 
 import voluptuous as vol
 from aiohttp import web
@@ -321,21 +320,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _save_and_refresh(label: str) -> None:
         d = shared
-        t0 = time.monotonic()
         await d["store"].async_save({"spools": d["spools"], "mappings": d["mappings"]})
-        t1 = time.monotonic()
+        # Runs the sensor's @callback handler synchronously, so the new entity
+        # state is written (and its state_changed event queued to every open
+        # browser) before the service call returns to the caller.
         async_dispatcher_send(hass, SIGNAL_SPOOLS_UPDATED)
-        t2 = time.monotonic()
-        _LOGGER.info(
-            "Filament Tracker: %s — disk write %.3fs, dispatch %.3fs, handler total %.3fs",
-            label,
-            t1 - t0,
-            t2 - t1,
-            t2 - t0,
-        )
+        _LOGGER.debug("Filament Tracker: %s saved and dispatched", label)
 
     async def handle_add_spool(call: ServiceCall) -> None:
-        t_start = time.monotonic()
         d = shared
         spools = d["spools"]
         next_id = max([s["id"] for s in spools], default=0) + 1
@@ -351,24 +343,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         )
         await _save_and_refresh("add_spool")
-        _LOGGER.info(
-            "Filament Tracker: add_spool call handler returning after %.3fs (spool id %s)",
-            time.monotonic() - t_start,
-            next_id,
-        )
 
     async def handle_delete_spool(call: ServiceCall) -> None:
-        t_start = time.monotonic()
         d = shared
         d["spools"] = [s for s in d["spools"] if s["id"] != call.data["id"]]
         d["mappings"] = {
             slot: sid for slot, sid in d["mappings"].items() if sid != call.data["id"]
         }
         await _save_and_refresh("delete_spool")
-        _LOGGER.info(
-            "Filament Tracker: delete_spool call handler returning after %.3fs",
-            time.monotonic() - t_start,
-        )
 
     async def handle_update_spool(call: ServiceCall) -> None:
         d = shared

@@ -203,8 +203,9 @@ class FilamentTrackerCard extends HTMLElement {
     this._activeMaterial = null;
     this._sort = "material";
     this._editingId = null;
-    this._overrideDbState = null;
     this._pendingSpool = null;
+    this._pendingBaseline = 0;
+    this._pendingTimer = null;
   }
 
   setConfig(config) {
@@ -415,7 +416,7 @@ class FilamentTrackerCard extends HTMLElement {
       if (!sel) return;
       const data = { slot: parseInt(sel.dataset.slot, 10) };
       if (sel.value !== "") data.spool_id = parseInt(sel.value, 10);
-      this._callServiceAndRefresh("set_slot_mapping", data);
+      this._callService("set_slot_mapping", data);
     });
     this.$.chips.addEventListener("click", (e) => {
       const chip = e.target.closest(".chip");
@@ -428,7 +429,7 @@ class FilamentTrackerCard extends HTMLElement {
       if (del) {
         e.stopPropagation();
         if (confirm("Ștergi această bobină?")) {
-          this._callServiceAndRefresh("delete_spool", { id: parseInt(del.dataset.id, 10) });
+          this._callService("delete_spool", { id: parseInt(del.dataset.id, 10) });
         }
         return;
       }
@@ -447,9 +448,9 @@ class FilamentTrackerCard extends HTMLElement {
         // A placeholder that never got confirmed shouldn't be a dead end —
         // give it a way out instead of pulsing forever. Dismissing it only
         // clears the local placeholder; if the write did land server-side
-        // after all, it'll show up normally on the next real refresh.
+        // after all, it'll show up normally on the next state push.
         if (confirm("Nu s-a confirmat încă adăugarea. Renunți la această bobină?")) {
-          this._pendingSpool = null;
+          this._clearPending();
           this._renderShelf();
         }
         return;
@@ -460,6 +461,7 @@ class FilamentTrackerCard extends HTMLElement {
 
   // ---------- per-hass-update rendering ----------
   _updateAll() {
+    this._resolvePending();
     this._updateStats();
     this._updateLoaded();
     this._updateMapping();
@@ -470,18 +472,23 @@ class FilamentTrackerCard extends HTMLElement {
 
   // The real entity data, no optimistic entries mixed in — used whenever
   // code needs to check what the backend has actually confirmed.
+  //
+  // hass.states is the single source of truth, exactly as it is for every
+  // other Lovelace card. Earlier versions of this card also fetched the
+  // entity over REST after each write and kept whichever copy carried the
+  // newer last_updated, on the theory that the push was unreliable. It was
+  // not: the integration was publishing its live spool list by reference as
+  // the entity's attributes, so Home Assistant's attribute diffing compared
+  // that list against itself and dropped it from the push (see the long
+  // comment on FilamentSpoolsSensor._refresh). The two copies then always
+  // shared a last_updated, the tie went to the push, and the correct REST
+  // copy was discarded on every single attempt — which is what made a new
+  // spool never appear no matter how long the card polled for it. With the
+  // backend publishing snapshots, the push carries the change and there is
+  // nothing left to reconcile.
   _rawSpoolsAttr() {
     const live = this._hass.states["sensor.filament_spools_db"];
-    const liveTime = live ? Date.parse(live.last_updated || live.last_changed || 0) || 0 : 0;
-    const override = this._overrideDbState;
-    const overrideTime = override ? Date.parse(override.last_updated || override.last_changed || 0) || 0 : -1;
-    // Right after a write, we fetch the entity directly instead of waiting on
-    // HA to push the new hass object to this card — that push has proven
-    // unreliable for some setups (visible only after a full page reload
-    // otherwise). Whichever snapshot is actually newer wins, so this heals
-    // itself the moment a genuine live push does arrive.
-    const best = overrideTime > liveTime ? override : live;
-    return best && best.attributes ? best.attributes : null;
+    return live && live.attributes ? live.attributes : null;
   }
 
   _spoolsAttr() {
@@ -499,75 +506,33 @@ class FilamentTrackerCard extends HTMLElement {
     return attrs;
   }
 
-  // Call a filament_tracker service, then force-fetch the entity's current
-  // state directly via REST rather than waiting for the passive hass push.
-  async _callServiceAndRefresh(service, data) {
-    const t0 = performance.now();
+  // Call a filament_tracker service. Nothing to re-fetch afterwards: the
+  // service handler writes the entity's new state before it returns, and Home
+  // Assistant pushes that straight into this card's `hass` setter.
+  async _callService(service, data) {
     try {
       await this._hass.callService("filament_tracker", service, data);
     } catch (e) {
       console.error("filament-tracker-card: service call failed", service, e);
     }
-    const t1 = performance.now();
-    await this._forceRefresh();
-    const t2 = performance.now();
-    console.info(
-      `filament-tracker-card: ${service} — callService ${(t1 - t0).toFixed(0)}ms, forceRefresh ${(t2 - t1).toFixed(0)}ms, total ${(t2 - t0).toFixed(0)}ms`
-    );
   }
 
-  // Like _callServiceAndRefresh, but for add specifically: doesn't trust a
-  // single post-write fetch, because that has proven to sometimes still
-  // return pre-write data even though the write itself already succeeded
-  // (confirmed by it always being there after a full page reload). Instead
-  // it re-fetches and checks isConfirmed(attrs) until it's actually true,
-  // backing off between tries, and reports how many tries it took.
-  async _callServiceAndRefreshUntil(service, data, isConfirmed, { retries = 8, delayMs = 300 } = {}) {
-    const t0 = performance.now();
-    try {
-      await this._hass.callService("filament_tracker", service, data);
-    } catch (e) {
-      console.error("filament-tracker-card: service call failed", service, e);
-      await this._forceRefresh();
-      return { confirmed: false, attempts: 0 };
+  // Drop the optimistic placeholder as soon as the entity actually shows the
+  // new spool. Runs on every hass push, so whichever update carries the write
+  // clears it — no polling, no timers in the happy path.
+  _resolvePending() {
+    if (!this._pendingSpool) return;
+    if ((this._rawSpoolsAttr()?.spools || []).length > this._pendingBaseline) {
+      this._clearPending();
     }
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      await this._forceRefresh();
-      const attrs = this._rawSpoolsAttr();
-      if (isConfirmed(attrs)) {
-        console.info(
-          `filament-tracker-card: ${service} confirmed after ${attempt} fetch(es), ${(performance.now() - t0).toFixed(0)}ms total`
-        );
-        return { confirmed: true, attempts: attempt };
-      }
-      if (attempt < retries) await new Promise((r) => setTimeout(r, delayMs));
-    }
-    console.warn(
-      `filament-tracker-card: ${service} — backend never reflected the write after ${retries} fetches over ${(performance.now() - t0).toFixed(0)}ms`
-    );
-    return { confirmed: false, attempts: retries };
   }
 
-  async _forceRefresh() {
-    try {
-      // The cache-buster matters here: repeated polling proved the backend
-      // write itself completes almost immediately, yet this exact GET can
-      // still return pre-write data for seconds afterward — the signature
-      // of something between the browser and HA (a reverse proxy, a
-      // Cloudflare/Nabu Casa tunnel, etc.) caching the response by URL. HA
-      // itself sends no cache headers on this endpoint, so nothing here
-      // should be cached, but a query string that changes every call
-      // defeats any URL-keyed cache regardless of where it lives.
-      this._overrideDbState = await this._hass.callApi(
-        "GET",
-        `states/sensor.filament_spools_db?_=${Date.now()}`
-      );
-      this._updateAll();
-    } catch (e) {
-      // Best-effort — if this fails, the normal reactive hass push (when it
-      // arrives) still updates the card as before.
-      console.warn("filament-tracker-card: force refresh failed", e);
+  _clearPending() {
+    if (this._pendingTimer) {
+      clearTimeout(this._pendingTimer);
+      this._pendingTimer = null;
     }
+    this._pendingSpool = null;
   }
 
   _threshold() {
@@ -853,41 +818,42 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.bambuColorList.innerHTML = "";
     this.$.addForm.setAttribute("hidden", "");
 
-    // Show it on the shelf right now, dimmed and unclickable, instead of
-    // making the click wait on the round trip through Home Assistant's
-    // service call — that trip's actual duration depends on server load and
-    // isn't something this card can guarantee is fast. _spoolsAttr() splices
-    // this in everywhere until the real write is confirmed below.
-    const countBefore = (this._rawSpoolsAttr()?.spools || []).length;
+    // Show it on the shelf right now, dimmed, instead of making the click wait
+    // on the round trip through Home Assistant's service call. _spoolsAttr()
+    // splices this in everywhere until _resolvePending() sees the real entity
+    // state carry the write, which normally happens within the same tick that
+    // the service call resolves.
+    this._clearPending();
+    this._pendingBaseline = (this._rawSpoolsAttr()?.spools || []).length;
     this._activeMaterial = null;
     this.$.search.value = "";
     this._collapsed.clear();
     this._pendingSpool = { ...data, id: -Date.now(), label: data.label || "Spool", material: data.material || "Altele", _pending: true };
+
+    // Safety net only, for the case where no state push ever arrives at all
+    // (dropped connection, entity missing because the integration isn't set
+    // up). Never leave a placeholder pulsing with no explanation — say so, and
+    // let a click dismiss it.
+    this._pendingTimer = setTimeout(() => {
+      this._pendingTimer = null;
+      if (!this._pendingSpool) return;
+      console.warn("filament-tracker-card: add_spool never showed up in sensor.filament_spools_db");
+      this._pendingSpool.label += " (neconfirmat)";
+      this._renderShelf();
+    }, 10000);
     this._renderShelf();
 
     this.$.addSubmit.disabled = true;
     this.$.addSubmit.textContent = "Se adaugă…";
-    // Don't trust a single post-write fetch — poll until the spool count
-    // actually goes up. A write that's real but not immediately visible on
-    // the first read is exactly the failure mode that made the old
-    // single-fetch version flash the placeholder and then silently revert
-    // to pre-add data.
-    const { confirmed } = await this._callServiceAndRefreshUntil(
-      "add_spool",
-      data,
-      (attrs) => (attrs?.spools || []).length > countBefore
-    );
+    try {
+      await this._hass.callService("filament_tracker", "add_spool", data);
+    } catch (e) {
+      console.error("filament-tracker-card: add_spool failed", e);
+      this._clearPending();
+    }
     this.$.addSubmit.disabled = false;
     this.$.addSubmit.textContent = "Adaugă";
-
-    if (confirmed) {
-      this._pendingSpool = null;
-    } else {
-      // Never silently vanish it — leave the dimmed placeholder up so it's
-      // obvious something is still pending rather than looking like the add
-      // was lost, and keep it out of the shelf's own material/search filters.
-      this._pendingSpool.label += " (se confirmă încă…)";
-    }
+    this._resolvePending();
     this._renderShelf();
   }
 
@@ -924,7 +890,7 @@ class FilamentTrackerCard extends HTMLElement {
 
   _saveEditor() {
     if (this._editingId == null) return;
-    this._callServiceAndRefresh("update_spool", {
+    this._callService("update_spool", {
       id: this._editingId,
       weight_remaining: parseFloat(this.$.editorRemaining.value) || 0,
       status: this.$.editorStatus.value,
@@ -935,7 +901,7 @@ class FilamentTrackerCard extends HTMLElement {
   _deleteFromEditor() {
     if (this._editingId == null) return;
     if (confirm("Ștergi această bobină?")) {
-      this._callServiceAndRefresh("delete_spool", { id: this._editingId });
+      this._callService("delete_spool", { id: this._editingId });
     }
     this._closeEditor();
   }
