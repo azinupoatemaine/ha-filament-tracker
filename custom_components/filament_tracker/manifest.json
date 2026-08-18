@@ -1,9 +1,11 @@
 {
   "domain": "filament_tracker",
   "name": "Filament Tracker",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "codeowners": ["@azinupoatemaine"],
   "config_flow": true,
+  "dependencies": ["http", "frontend"],
+  "after_dependencies": ["lovelace"],
   "documentation": "https://github.com/azinupoatemaine/ha-filament-tracker",
   "issue_tracker": "https://github.com/azinupoatemaine/ha-filament-tracker/issues",
   "integration_type": "service",

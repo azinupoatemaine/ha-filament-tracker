@@ -634,7 +634,14 @@ class FilamentTrackerCard extends HTMLElement {
   }
 }
 
-customElements.define("filament-tracker-card", FilamentTrackerCard);
+// Guarded: the card is registered both as an extra frontend module and as a
+// dashboard resource. Identical URLs are deduped by the browser's module map,
+// but a stale resource entry pointing at an older ?v= would evaluate this file
+// a second time — and an unguarded define() throws, taking the whole module
+// down before the editor below ever gets registered.
+if (!customElements.get("filament-tracker-card")) {
+  customElements.define("filament-tracker-card", FilamentTrackerCard);
+}
 
 // Visual config editor — shown in the card's "Edit" GUI, no YAML needed to customize.
 class FilamentTrackerCardEditor extends HTMLElement {
@@ -680,11 +687,15 @@ class FilamentTrackerCardEditor extends HTMLElement {
   }
 }
 
-customElements.define("filament-tracker-card-editor", FilamentTrackerCardEditor);
+if (!customElements.get("filament-tracker-card-editor")) {
+  customElements.define("filament-tracker-card-editor", FilamentTrackerCardEditor);
+}
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "filament-tracker-card",
-  name: "Filament Tracker",
-  description: "Live AMS trays, manual mapping, and a searchable/sortable spool shelf with add/delete — all in one card.",
-});
+if (!window.customCards.some((c) => c && c.type === "filament-tracker-card")) {
+  window.customCards.push({
+    type: "filament-tracker-card",
+    name: "Filament Tracker",
+    description: "Live AMS trays, manual mapping, and a searchable/sortable spool shelf with add/delete — all in one card.",
+  });
+}

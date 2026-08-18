@@ -13,7 +13,11 @@ SIGNAL_SPOOLS_UPDATED = f"{DOMAIN}_updated"
 DEFAULT_LOW_STOCK_THRESHOLD = 100.0
 OPT_LOW_STOCK_THRESHOLD = "low_stock_threshold"
 
-CARD_VERSION = "2"
+# Bump this whenever the card JS changes. It is used as the ?v= cache-buster in
+# the module URL, and (because the old static handler served the file with a
+# one-month Cache-Control) it is the only reliable way to force browsers to
+# re-fetch the card.
+CARD_VERSION = "3"
 CARD_URL_PATH = f"/{DOMAIN}_frontend"
 CARD_FILENAME = "filament-tracker-card.js"
 

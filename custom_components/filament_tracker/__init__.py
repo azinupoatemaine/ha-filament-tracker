@@ -6,7 +6,9 @@ import pathlib
 import re
 
 import voluptuous as vol
+from aiohttp import web
 
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
@@ -88,6 +90,105 @@ def discover_printer_prefixes(hass: HomeAssistant) -> set[str]:
     return prefixes
 
 
+class FilamentTrackerCardView(HomeAssistantView):
+    """Serve the card JS ourselves, with an explicit JavaScript content type.
+
+    Home Assistant's static-path handler derives Content-Type from Python's
+    ``mimetypes`` database (``CachingStaticResource`` does
+    ``content_type = guess_file_type(path)[0] or "application/octet-stream"``).
+    Browsers enforce strict MIME checking for ES modules: the frontend loads
+    extra modules with a dynamic ``import()``, and if the response isn't served
+    as a JavaScript type the import is rejected *silently* — an unhandled
+    promise rejection in the console, while the network request itself is a
+    perfectly ordinary 200. The card then never defines its custom element and
+    the dashboard sits on "Loading card..." forever.
+
+    Serving the file from our own view with a hardcoded Content-Type removes
+    that failure mode entirely, regardless of the host OS mimetypes config.
+    """
+
+    requires_auth = False
+    url = f"{CARD_URL_PATH}/{CARD_FILENAME}"
+    name = f"{DOMAIN}:card"
+
+    def __init__(self, js_path: pathlib.Path) -> None:
+        """Store the path to the card file on disk."""
+        self._js_path = js_path
+
+    async def get(self, request: web.Request) -> web.FileResponse:
+        """Return the card JS with a guaranteed-correct module MIME type."""
+        return web.FileResponse(
+            self._js_path,
+            headers={
+                "Content-Type": "application/javascript; charset=utf-8",
+                # Deliberately not a long-lived cache: the ?v= cache buster
+                # handles versioning, and a stale month-long cached copy is
+                # impossible to clear from the user's side.
+                "Cache-Control": "public, max-age=0, must-revalidate",
+            },
+        )
+
+
+def _lovelace_attr(lovelace: object, *names: str):
+    """Read an attribute off the Lovelace data (a dataclass now, a dict on old HA)."""
+    for name in names:
+        if isinstance(lovelace, dict):
+            if name in lovelace:
+                return lovelace[name]
+        elif hasattr(lovelace, name):
+            return getattr(lovelace, name)
+    return None
+
+
+async def _async_register_lovelace_resource(hass: HomeAssistant, module_url: str) -> None:
+    """Also register the card as a real dashboard resource, in storage mode.
+
+    ``add_extra_js_url`` on its own has proven unreliable for cards bundled
+    inside an integration, while cards loaded as ordinary Lovelace resources
+    keep working. Registering both costs nothing: the browser's module map
+    dedupes the identical URL, so the file is still only evaluated once.
+    """
+    lovelace = hass.data.get("lovelace")
+    if lovelace is None:
+        _LOGGER.debug("Filament Tracker: Lovelace not set up, skipping resource registration")
+        return
+
+    resources = _lovelace_attr(lovelace, "resources")
+    mode = _lovelace_attr(lovelace, "resource_mode", "mode")
+    if resources is None:
+        return
+    if mode != "storage":
+        _LOGGER.debug(
+            "Filament Tracker: Lovelace resources are in YAML mode — add the card "
+            "yourself with: resources: [{url: %s, type: module}]",
+            module_url,
+        )
+        return
+
+    # async_items() doesn't lazy-load the collection; async_get_info() does.
+    if hasattr(resources, "async_get_info"):
+        await resources.async_get_info()
+
+    base_url = f"{CARD_URL_PATH}/{CARD_FILENAME}"
+    existing = next(
+        (
+            item
+            for item in (resources.async_items() or [])
+            if str(item.get("url", "")).split("?")[0] == base_url
+        ),
+        None,
+    )
+
+    if existing is None:
+        await resources.async_create_item({"res_type": "module", "url": module_url})
+        _LOGGER.info("Filament Tracker: added dashboard resource %s", module_url)
+    elif existing.get("url") != module_url:
+        await resources.async_update_item(
+            existing["id"], {"res_type": "module", "url": module_url}
+        )
+        _LOGGER.info("Filament Tracker: updated dashboard resource to %s", module_url)
+
+
 async def _async_register_frontend(hass: HomeAssistant) -> None:
     """Serve the card JS and register it as a Lovelace resource, once."""
     if hass.data.get(DOMAIN, {}).get("_frontend_registered"):
@@ -96,7 +197,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
 
     www_dir = pathlib.Path(__file__).parent / "www"
     js_path = www_dir / CARD_FILENAME
-    if not js_path.exists():
+    if not await hass.async_add_executor_job(js_path.exists):
         _LOGGER.error(
             "Filament Tracker: card file missing at %s — the www/ folder didn't get "
             "installed correctly. Reinstalling via HACS (Remove, then re-add) usually fixes this.",
@@ -107,29 +208,18 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     module_url = f"{CARD_URL_PATH}/{CARD_FILENAME}?v={CARD_VERSION}"
 
     try:
-        try:
-            from homeassistant.components.http import StaticPathConfig
-
-            await hass.http.async_register_static_paths(
-                [StaticPathConfig(CARD_URL_PATH, str(www_dir), True)]
-            )
-            _LOGGER.warning(
-                "Filament Tracker: registered static path %s -> %s (async API)",
-                CARD_URL_PATH,
-                www_dir,
-            )
-        except ImportError:
-            hass.http.register_static_path(CARD_URL_PATH, str(www_dir), cache_headers=True)
-            _LOGGER.warning(
-                "Filament Tracker: registered static path %s -> %s (legacy API)",
-                CARD_URL_PATH,
-                www_dir,
-            )
+        hass.http.register_view(FilamentTrackerCardView(js_path))
+        _LOGGER.info(
+            "Filament Tracker: serving %s from %s as application/javascript",
+            FilamentTrackerCardView.url,
+            js_path,
+        )
 
         from homeassistant.components.frontend import add_extra_js_url
 
         add_extra_js_url(hass, module_url)
-        _LOGGER.warning("Filament Tracker: registered frontend module %s", module_url)
+        await _async_register_lovelace_resource(hass, module_url)
+        _LOGGER.info("Filament Tracker: registered frontend module %s", module_url)
     except Exception:
         _LOGGER.exception(
             "Filament Tracker: failed to register the card as a frontend resource. "
