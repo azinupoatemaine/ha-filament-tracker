@@ -200,6 +200,7 @@ class FilamentTrackerCard extends HTMLElement {
     this._activeMaterial = null;
     this._sort = "material";
     this._editingId = null;
+    this._overrideDbState = null;
   }
 
   setConfig(config) {
@@ -410,7 +411,7 @@ class FilamentTrackerCard extends HTMLElement {
       if (!sel) return;
       const data = { slot: parseInt(sel.dataset.slot, 10) };
       if (sel.value !== "") data.spool_id = parseInt(sel.value, 10);
-      this._hass.callService("filament_tracker", "set_slot_mapping", data);
+      this._callServiceAndRefresh("set_slot_mapping", data);
     });
     this.$.chips.addEventListener("click", (e) => {
       const chip = e.target.closest(".chip");
@@ -423,7 +424,7 @@ class FilamentTrackerCard extends HTMLElement {
       if (del) {
         e.stopPropagation();
         if (confirm("Ștergi această bobină?")) {
-          this._hass.callService("filament_tracker", "delete_spool", { id: parseInt(del.dataset.id, 10) });
+          this._callServiceAndRefresh("delete_spool", { id: parseInt(del.dataset.id, 10) });
         }
         return;
       }
@@ -454,8 +455,39 @@ class FilamentTrackerCard extends HTMLElement {
   }
 
   _spoolsAttr() {
-    const ent = this._hass.states["sensor.filament_spools_db"];
-    return ent && ent.attributes ? ent.attributes : null;
+    const live = this._hass.states["sensor.filament_spools_db"];
+    const liveTime = live ? Date.parse(live.last_updated || live.last_changed || 0) || 0 : 0;
+    const override = this._overrideDbState;
+    const overrideTime = override ? Date.parse(override.last_updated || override.last_changed || 0) || 0 : -1;
+    // Right after a write, we fetch the entity directly instead of waiting on
+    // HA to push the new hass object to this card — that push has proven
+    // unreliable for some setups (visible only after a full page reload
+    // otherwise). Whichever snapshot is actually newer wins, so this heals
+    // itself the moment a genuine live push does arrive.
+    const best = overrideTime > liveTime ? override : live;
+    return best && best.attributes ? best.attributes : null;
+  }
+
+  // Call a filament_tracker service, then force-fetch the entity's current
+  // state directly via REST rather than waiting for the passive hass push.
+  async _callServiceAndRefresh(service, data) {
+    try {
+      await this._hass.callService("filament_tracker", service, data);
+    } catch (e) {
+      console.error("filament-tracker-card: service call failed", service, e);
+    }
+    await this._forceRefresh();
+  }
+
+  async _forceRefresh() {
+    try {
+      this._overrideDbState = await this._hass.callApi("GET", "states/sensor.filament_spools_db");
+      this._updateAll();
+    } catch (e) {
+      // Best-effort — if this fails, the normal reactive hass push (when it
+      // arrives) still updates the card as before.
+      console.warn("filament-tracker-card: force refresh failed", e);
+    }
   }
 
   _threshold() {
@@ -727,7 +759,7 @@ class FilamentTrackerCard extends HTMLElement {
       weight_remaining: parseFloat(this.$.inRemaining.value) || 0,
       status: this.$.inStatus.value,
     };
-    this._hass.callService("filament_tracker", "add_spool", data);
+    this._callServiceAndRefresh("add_spool", data);
     this.$.inLabel.value = "";
     this.$.inMaterial.value = "";
     this.$.inColor.value = "#888888";
@@ -774,7 +806,7 @@ class FilamentTrackerCard extends HTMLElement {
 
   _saveEditor() {
     if (this._editingId == null) return;
-    this._hass.callService("filament_tracker", "update_spool", {
+    this._callServiceAndRefresh("update_spool", {
       id: this._editingId,
       weight_remaining: parseFloat(this.$.editorRemaining.value) || 0,
       status: this.$.editorStatus.value,
@@ -785,7 +817,7 @@ class FilamentTrackerCard extends HTMLElement {
   _deleteFromEditor() {
     if (this._editingId == null) return;
     if (confirm("Ștergi această bobină?")) {
-      this._hass.callService("filament_tracker", "delete_spool", { id: this._editingId });
+      this._callServiceAndRefresh("delete_spool", { id: this._editingId });
     }
     this._closeEditor();
   }

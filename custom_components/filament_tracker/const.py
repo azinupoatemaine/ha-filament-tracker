@@ -17,7 +17,7 @@ OPT_LOW_STOCK_THRESHOLD = "low_stock_threshold"
 # the module URL, and (because the old static handler served the file with a
 # one-month Cache-Control) it is the only reliable way to force browsers to
 # re-fetch the card.
-CARD_VERSION = "5"
+CARD_VERSION = "6"
 CARD_URL_PATH = f"/{DOMAIN}_frontend"
 CARD_FILENAME = "filament-tracker-card.js"
 
