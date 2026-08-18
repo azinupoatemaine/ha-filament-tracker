@@ -50,6 +50,20 @@ const BAMBU_COLORS = {
   },
 };
 
+// Every togglable section of the card, in the order they appear. Drives both
+// the visual editor's checkbox list and nothing else — the card itself reads
+// the keys directly — so adding a section here is all it takes to expose it.
+const CARD_SECTIONS = [
+  { key: "show_title", label: "Titlu și subtitlu" },
+  { key: "show_stats", label: "Statistici (g total, stoc redus)" },
+  { key: "show_ams", label: "Încărcat acum (tăvile AMS)" },
+  { key: "show_loaded_manual", label: "Încărcat manual (din rezervă)" },
+  { key: "show_mapping", label: "Mapare manuală AMS" },
+  { key: "show_add", label: "Buton și formular „Adaugă bobină”" },
+  { key: "show_search", label: "Căutare, sortare și filtre pe material" },
+  { key: "show_shelf", label: "Raftul cu bobine" },
+];
+
 const CARD_CSS = `
   :host {
     --ft-accent: #1F7A4D;
@@ -210,6 +224,41 @@ class FilamentTrackerCard extends HTMLElement {
 
   setConfig(config) {
     this._config = config || {};
+    // Lovelace calls this again on every keystroke in the edit dialog's
+    // preview, so the visible sections have to follow immediately — not wait
+    // for the next hass push, which may be seconds away on a quiet system.
+    if (this._built) {
+      this._applyVisibility();
+      if (this._hass) this._updateAll();
+    }
+  }
+
+  // Every section defaults to visible: a config written before these options
+  // existed, or one that simply omits them, must keep the full card.
+  _showOpt(key) {
+    return !this._config || this._config[key] !== false;
+  }
+
+  _applyVisibility() {
+    if (!this.$) return;
+    const set = (el, visible) => {
+      if (!el) return;
+      if (visible) el.removeAttribute("hidden");
+      else el.setAttribute("hidden", "");
+    };
+    const title = this._showOpt("show_title");
+    const stats = this._showOpt("show_stats");
+    set(this.$.titleWrap, title);
+    set(this.$.stats, stats);
+    // Don't leave an empty flex row (and its gap) behind when both halves of
+    // the header are switched off.
+    set(this.$.secHeader, title || stats);
+    set(this.$.secLoaded, this._showOpt("show_ams"));
+    set(this.$.secMapping, this._showOpt("show_mapping"));
+    set(this.$.secAdd, this._showOpt("show_add"));
+    set(this.$.secSearch, this._showOpt("show_search"));
+    set(this.$.shelf, this._showOpt("show_shelf"));
+    // "Încărcat manual" is also data-dependent, so _updateLoadedManual owns it.
   }
 
   set hass(hass) {
@@ -237,15 +286,15 @@ class FilamentTrackerCard extends HTMLElement {
     root.innerHTML = `<style>${CARD_CSS}</style><ha-card></ha-card>`;
     this._card = root.querySelector("ha-card");
     this._card.innerHTML = `
-      <div class="header">
-        <div class="title-wrap">
+      <div class="header" id="ft-sec-header">
+        <div class="title-wrap" id="ft-title-wrap">
           <div class="title"><ha-icon icon="mdi:printer-3d-nozzle"></ha-icon>Filament Stock</div>
           <div class="subtitle" id="ft-subtitle"></div>
         </div>
         <div class="stats" id="ft-stats"></div>
       </div>
 
-      <div>
+      <div id="ft-sec-loaded">
         <div class="section-label"><ha-icon icon="mdi:printer-3d" style="--mdc-icon-size:14px;"></ha-icon>Încărcat acum</div>
         <div class="tray-rack" id="ft-loaded"></div>
       </div>
@@ -255,12 +304,12 @@ class FilamentTrackerCard extends HTMLElement {
         <div class="tray-rack" id="ft-loaded-manual"></div>
       </div>
 
-      <div>
+      <div id="ft-sec-mapping">
         <div class="section-label"><ha-icon icon="mdi:swap-horizontal" style="--mdc-icon-size:14px;"></ha-icon>Mapare manuală AMS</div>
         <div class="mapping-grid" id="ft-mapping"></div>
       </div>
 
-      <div>
+      <div id="ft-sec-add">
         <button class="add-toggle" id="ft-add-toggle"><ha-icon icon="mdi:plus-circle"></ha-icon>Adaugă bobină</button>
         <div class="add-form" id="ft-add-form" hidden style="margin-top:10px;">
           <div class="grid">
@@ -309,21 +358,29 @@ class FilamentTrackerCard extends HTMLElement {
       </div>
 
       <div>
-        <div class="toolbar">
-          <input type="text" id="ft-search" placeholder="Caută după nume sau culoare…">
-          <select id="ft-sort">
-            <option value="material">Sortează: Material</option>
-            <option value="name">Sortează: Nume</option>
-            <option value="amount">Sortează: Cantitate</option>
-          </select>
+        <div id="ft-sec-search">
+          <div class="toolbar">
+            <input type="text" id="ft-search" placeholder="Caută după nume sau culoare…">
+            <select id="ft-sort">
+              <option value="material">Sortează: Material</option>
+              <option value="name">Sortează: Nume</option>
+              <option value="amount">Sortează: Cantitate</option>
+            </select>
+          </div>
+          <div class="chip-row" id="ft-chips" style="margin-top:8px;"></div>
         </div>
-        <div class="chip-row" id="ft-chips" style="margin-top:8px;"></div>
         <div id="ft-shelf" style="display:flex;flex-direction:column;gap:12px;margin-top:12px;"></div>
       </div>
     `;
 
     // Elements that persist and must never be innerHTML-replaced.
     this.$ = {
+      secHeader: this._card.querySelector("#ft-sec-header"),
+      titleWrap: this._card.querySelector("#ft-title-wrap"),
+      secLoaded: this._card.querySelector("#ft-sec-loaded"),
+      secMapping: this._card.querySelector("#ft-sec-mapping"),
+      secAdd: this._card.querySelector("#ft-sec-add"),
+      secSearch: this._card.querySelector("#ft-sec-search"),
       subtitle: this._card.querySelector("#ft-subtitle"),
       stats: this._card.querySelector("#ft-stats"),
       loaded: this._card.querySelector("#ft-loaded"),
@@ -461,9 +518,12 @@ class FilamentTrackerCard extends HTMLElement {
 
   // ---------- per-hass-update rendering ----------
   _updateAll() {
+    this._applyVisibility();
     this._resolvePending();
     // _updateLoaded populates _discoveredSlots, which _updateStats needs in
     // order to total up what's loaded in the AMS — so it has to run first.
+    // It keeps running even when the tray strip is hidden: the AMS total and
+    // the mapping dropdowns' slot labels both depend on that discovery.
     this._updateLoaded();
     this._updateStats();
     this._updateMapping();
@@ -710,6 +770,10 @@ class FilamentTrackerCard extends HTMLElement {
   // A spool currently mapped to a slot is "in the printer", not "in reserve" —
   // pull it off the shelf and show it here instead, next to the real AMS trays.
   _updateLoadedManual() {
+    if (!this._showOpt("show_loaded_manual")) {
+      this.$.loadedManualWrap.setAttribute("hidden", "");
+      return;
+    }
     const attrs = this._spoolsAttr();
     const mappings = attrs && attrs.mappings ? attrs.mappings : {};
     const spools = attrs && attrs.spools ? attrs.spools : [];
@@ -989,7 +1053,33 @@ class FilamentTrackerCardEditor extends HTMLElement {
           color: var(--primary-text-color);
         }
         .hint { font-size: 11px; color: var(--secondary-text-color); }
+        .group-title {
+          font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+          color: var(--secondary-text-color); margin-top: 4px;
+        }
+        .toggles { display: flex; flex-direction: column; gap: 2px; padding: 8px 0 4px; }
+        .toggle {
+          display: flex; align-items: center; gap: 10px; padding: 7px 8px;
+          border-radius: 8px; cursor: pointer; font-size: 13.5px;
+          color: var(--primary-text-color);
+        }
+        .toggle:hover { background: var(--secondary-background-color); }
+        .toggle input { width: 17px; height: 17px; margin: 0; padding: 0; accent-color: var(--primary-color); cursor: pointer; }
+        .divider { height: 1px; background: var(--divider-color); margin: 12px 0 4px; }
       </style>
+      <div class="group-title">Ce se afișează</div>
+      <div class="toggles">
+        ${CARD_SECTIONS.map(
+          (s) => `<label class="toggle">
+            <input type="checkbox" data-key="${esc(s.key)}"${this._config[s.key] !== false ? " checked" : ""}>
+            <span>${esc(s.label)}</span>
+          </label>`
+        ).join("")}
+      </div>
+      <div class="hint">Debifează ce nu-ți trebuie — de exemplu tăvile AMS, dacă le ai deja pe alt card.</div>
+
+      <div class="divider"></div>
+      <div class="group-title">Setări</div>
       <div class="row">
         <label>Prag stoc redus (g) — opțional</label>
         <input type="number" id="threshold" min="0" value="${esc(current)}" placeholder="folosește pragul din integrare">
@@ -1001,6 +1091,18 @@ class FilamentTrackerCardEditor extends HTMLElement {
         <div class="hint">Folosită ca să estimezi câte grame sunt în AMS, pornind de la procentul rămas. Bobinele Bambu cu RFID își raportează singure greutatea; asta se aplică doar celorlalte.</div>
       </div>
     `;
+
+    this.shadowRoot.querySelectorAll(".toggle input[data-key]").forEach((box) => {
+      box.addEventListener("change", (e) => {
+        const newConfig = { ...this._config };
+        // Only ever store the non-default. Keeping the config free of
+        // `show_x: true` noise means a card that was never customised stays a
+        // clean `{}`, and future sections default on without a migration.
+        if (e.target.checked) delete newConfig[e.target.dataset.key];
+        else newConfig[e.target.dataset.key] = false;
+        this._emit(newConfig);
+      });
+    });
     this.shadowRoot.querySelector("#threshold").addEventListener("change", (e) => {
       const v = e.target.value;
       const newConfig = { ...this._config };

@@ -52,8 +52,25 @@ hand-written automation lives inside the integration or the card instead:
   - `total_remaining`, `low_stock_count`, `low_stock_labels`, `totals_by_material`
 - **Services**: `filament_tracker.add_spool`, `delete_spool`, `update_spool`,
   `set_slot_mapping`
-- **`custom:filament-tracker-card`** — the widget. Optional YAML config:
-  `low_stock_threshold: <number>` (same thing the visual editor sets).
+- **`custom:filament-tracker-card`** — the widget. Everything below is optional and
+  also settable from the card's visual editor, so YAML is never required:
+
+  | Option | Default | Meaning |
+  | --- | --- | --- |
+  | `low_stock_threshold` | from the integration | Amber-bar threshold, in grams |
+  | `ams_spool_size` | `1000` | Assumed spool weight when a tray has no RFID `tray_weight`, used to turn the AMS's remaining-percentage into grams |
+  | `show_title` | `true` | Title and subtitle |
+  | `show_stats` | `true` | The `g total` / `stoc redus` pills |
+  | `show_ams` | `true` | "Loaded now" AMS tray strip |
+  | `show_loaded_manual` | `true` | "Loaded manually" strip |
+  | `show_mapping` | `true` | Manual AMS mapping dropdowns |
+  | `show_add` | `true` | Add-spool button and form |
+  | `show_search` | `true` | Search, sort, and material filter chips |
+  | `show_shelf` | `true` | The spool shelf itself |
+
+  Every `show_*` option defaults to on, so an existing card keeps working untouched.
+  Turn off what you already have elsewhere — the AMS tray strip in particular, if
+  you're using the cards that come with the Bambu integration.
 
 ## Card features
 
@@ -73,6 +90,12 @@ hand-written automation lives inside the integration or the card instead:
 - Search box, sort by material/name/amount, click a material chip to filter
 - Collapsible material groups, ≤10 spools per shelf row with a wood-tone divider
 - Low-stock spools get an amber bar automatically
+- The `g total` pill counts the shelf **plus** what's loaded in the AMS, estimated
+  per tray from its remaining percentage (exact for RFID spools, which report their
+  own nominal weight). A hand-mapped slot is counted from its real database entry
+  instead, never twice.
+- Every section can be switched off individually from the visual editor, so the card
+  can be trimmed down to just the parts you don't already have on the dashboard
 
 ## Data
 
