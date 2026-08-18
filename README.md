@@ -57,10 +57,11 @@ hand-written automation lives inside the integration or the card instead:
 
   | Option | Default | Meaning |
   | --- | --- | --- |
+  | `language` | `auto` | `auto` follows Home Assistant's own language; `en` or `ro` pins it |
   | `low_stock_threshold` | from the integration | Amber-bar threshold, in grams |
   | `ams_spool_size` | `1000` | Assumed spool weight when a tray has no RFID `tray_weight`, used to turn the AMS's remaining-percentage into grams |
   | `show_title` | `true` | Title and subtitle |
-  | `show_stats` | `true` | The `g total` / `stoc redus` pills |
+  | `show_stats` | `true` | The "g total" / "low stock" pills |
   | `show_ams` | `true` | "Loaded now" AMS tray strip |
   | `show_loaded_manual` | `true` | "Loaded manually" strip |
   | `show_mapping` | `true` | Manual AMS mapping dropdowns |
@@ -71,6 +72,12 @@ hand-written automation lives inside the integration or the card instead:
   Every `show_*` option defaults to on, so an existing card keeps working untouched.
   Turn off what you already have elsewhere — the AMS tray strip in particular, if
   you're using the cards that come with the Bambu integration.
+
+  The card ships in **English and Romanian** and follows your Home Assistant
+  language by default. Adding a language means adding one block to `I18N` in the
+  card JS and one entry to `LANGUAGES`; anything a translation is missing falls
+  back to English string by string. Spool statuses and material names are data,
+  not UI text — they're stored exactly as entered and only their labels translate.
 
 ## Card features
 

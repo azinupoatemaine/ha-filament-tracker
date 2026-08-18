@@ -7,6 +7,197 @@ function esc(str) {
   return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
+// ---------------------------------------------------------------------------
+// Translations. English is the fallback for any key a language is missing, so
+// an incomplete translation degrades one string at a time instead of breaking
+// the card. Spool status values ("Sealed"/"Opened"/"Empty") and material names
+// are *data*, not UI text — they stay exactly as the backend stores them, and
+// only their on-screen labels get translated.
+// ---------------------------------------------------------------------------
+const I18N = {
+  en: {
+    title: "Filament Stock",
+    subtitle_tracked: "{n} spools tracked",
+    not_configured: "Filament Tracker not set up yet",
+    stat_total: "g total",
+    stat_low: "low stock",
+    stat_ams: "g in AMS",
+    tip_breakdown: "{stock} g in stock + {ams} g in AMS (estimated from remaining percentage)",
+    tip_stock_only: "Filament in stock",
+    tip_ams: "Estimated from the remaining percentage the AMS reports",
+    tip_low: "Stock spools below the threshold — AMS not included",
+    sec_loaded_now: "Loaded now",
+    sec_loaded_manual: "Loaded manually (from stock)",
+    sec_mapping: "Manual AMS mapping",
+    no_ams: "No AMS sensor found — install ha-bambulab if you have a Bambu printer connected.",
+    tray_empty: "Empty",
+    map_none: "— None / RFID auto —",
+    slot_n: "Slot {n}",
+    manual_tile_tip: "Click to edit or unmap",
+    add_spool: "Add spool",
+    bambu_color: "Bambu color (optional)",
+    choose_line: "— choose line —",
+    type_or_choose: "type or choose…",
+    f_label: "Label",
+    f_material: "Material",
+    f_color: "Color (hex)",
+    f_full: "Total weight (g)",
+    f_remaining: "Remaining weight (g)",
+    f_status: "Status",
+    st_sealed: "Sealed",
+    st_opened: "Opened",
+    st_empty: "Empty",
+    cancel: "Cancel",
+    add: "Add",
+    adding: "Adding…",
+    save: "Save",
+    delete: "Delete",
+    confirm_delete: "Delete this spool?",
+    confirm_discard_pending: "This spool hasn't been confirmed yet. Discard it?",
+    unconfirmed_suffix: " (unconfirmed)",
+    saving_suffix: "saving…",
+    search_ph: "Search by name or color…",
+    sort_material: "Sort: Material",
+    sort_name: "Sort: Name",
+    sort_amount: "Sort: Amount",
+    empty_not_configured: "Filament Tracker isn't set up — add the integration and restart HA.",
+    empty_all_loaded: 'All spools are loaded right now — see "Loaded manually" above.',
+    empty_none: "No spools yet — add one above.",
+    empty_filter: "No spool matches the filter.",
+    group_meta: "{n} spools · {g}g",
+    ed_what: "What to show",
+    ed_hint_sections:
+      "Uncheck whatever you don't need — the AMS trays, for instance, if you already have them on another card.",
+    ed_settings: "Settings",
+    ed_language: "Language",
+    ed_lang_auto: "Automatic (Home Assistant language)",
+    ed_threshold: "Low-stock threshold (g) — optional",
+    ed_threshold_ph: "use the integration's threshold",
+    ed_threshold_hint:
+      "Leave empty to use the threshold from Settings → Devices & Services → Filament Tracker → Configure.",
+    ed_ams_size: "AMS spool weight (g) — optional",
+    ed_ams_hint:
+      "Used to estimate how many grams are in the AMS, starting from the remaining percentage. Bambu RFID spools report their own weight; this applies only to the rest.",
+    sec_opt_title: "Title and subtitle",
+    sec_opt_stats: "Stats (g total, low stock)",
+    sec_opt_ams: "Loaded now (AMS trays)",
+    sec_opt_manual: "Loaded manually (from stock)",
+    sec_opt_mapping: "Manual AMS mapping",
+    sec_opt_add: '"Add spool" button and form',
+    sec_opt_search: "Search, sort, and material filters",
+    sec_opt_shelf: "The spool shelf",
+  },
+  ro: {
+    title: "Filament Stock",
+    subtitle_tracked: "{n} bobine urmărite",
+    not_configured: "Filament Tracker neconfigurat încă",
+    stat_total: "g total",
+    stat_low: "stoc redus",
+    stat_ams: "g în AMS",
+    tip_breakdown: "{stock} g în rezervă + {ams} g în AMS (estimat din procentul rămas)",
+    tip_stock_only: "Filament în rezervă",
+    tip_ams: "Estimat din procentul rămas raportat de AMS",
+    tip_low: "Bobine din rezervă sub prag — nu include AMS",
+    sec_loaded_now: "Încărcat acum",
+    sec_loaded_manual: "Încărcat manual (din rezervă)",
+    sec_mapping: "Mapare manuală AMS",
+    no_ams: "Niciun senzor AMS găsit — instalează ha-bambulab dacă ai o imprimantă Bambu conectată.",
+    tray_empty: "Gol",
+    map_none: "— Niciuna / RFID auto —",
+    slot_n: "Slot {n}",
+    manual_tile_tip: "Apasă pentru a edita sau demapa",
+    add_spool: "Adaugă bobină",
+    bambu_color: "Culoare Bambu (opțional)",
+    choose_line: "— alege linia —",
+    type_or_choose: "tastează sau alege...",
+    f_label: "Etichetă",
+    f_material: "Material",
+    f_color: "Culoare (hex)",
+    f_full: "Greutate totală (g)",
+    f_remaining: "Greutate rămasă (g)",
+    f_status: "Stare",
+    st_sealed: "Sigilată",
+    st_opened: "Deschisă",
+    st_empty: "Goală",
+    cancel: "Anulează",
+    add: "Adaugă",
+    adding: "Se adaugă…",
+    save: "Salvează",
+    delete: "Șterge",
+    confirm_delete: "Ștergi această bobină?",
+    confirm_discard_pending: "Nu s-a confirmat încă adăugarea. Renunți la această bobină?",
+    unconfirmed_suffix: " (neconfirmat)",
+    saving_suffix: "se salvează…",
+    search_ph: "Caută după nume sau culoare…",
+    sort_material: "Sortează: Material",
+    sort_name: "Sortează: Nume",
+    sort_amount: "Sortează: Cantitate",
+    empty_not_configured: "Filament Tracker nu este configurat — adaugă integrarea și restart HA.",
+    empty_all_loaded: "Toate bobinele sunt încărcate acum — vezi „Încărcat manual” mai sus.",
+    empty_none: "Nicio bobină încă — adaugă una mai sus.",
+    empty_filter: "Nicio bobină nu corespunde filtrului.",
+    group_meta: "{n} bobine · {g}g",
+    ed_what: "Ce se afișează",
+    ed_hint_sections:
+      "Debifează ce nu-ți trebuie — de exemplu tăvile AMS, dacă le ai deja pe alt card.",
+    ed_settings: "Setări",
+    ed_language: "Limbă",
+    ed_lang_auto: "Automat (limba Home Assistant)",
+    ed_threshold: "Prag stoc redus (g) — opțional",
+    ed_threshold_ph: "folosește pragul din integrare",
+    ed_threshold_hint:
+      "Lasă gol ca să folosești pragul din Settings → Devices & Services → Filament Tracker → Configure.",
+    ed_ams_size: "Greutate bobină AMS (g) — opțional",
+    ed_ams_hint:
+      "Folosită ca să estimezi câte grame sunt în AMS, pornind de la procentul rămas. Bobinele Bambu cu RFID își raportează singure greutatea; asta se aplică doar celorlalte.",
+    sec_opt_title: "Titlu și subtitlu",
+    sec_opt_stats: "Statistici (g total, stoc redus)",
+    sec_opt_ams: "Încărcat acum (tăvile AMS)",
+    sec_opt_manual: "Încărcat manual (din rezervă)",
+    sec_opt_mapping: "Mapare manuală AMS",
+    sec_opt_add: "Buton și formular „Adaugă bobină”",
+    sec_opt_search: "Căutare, sortare și filtre pe material",
+    sec_opt_shelf: "Raftul cu bobine",
+  },
+};
+
+const LANGUAGES = [
+  { value: "en", label: "English" },
+  { value: "ro", label: "Română" },
+];
+
+// Status values are stored verbatim by the backend; these are display labels
+// only. Anything unrecognised (older data, a hand-edited store) shows as-is.
+const STATUS_KEYS = { Sealed: "st_sealed", Opened: "st_opened", Empty: "st_empty" };
+
+// The option *values* stay English because that's what gets written to the
+// backend and compared against; only the visible labels are translated.
+function statusOptions(card) {
+  return Object.keys(STATUS_KEYS)
+    .map((v) => `<option value="${v}">${esc(card._statusLabel(v))}</option>`)
+    .join("");
+}
+
+// "auto" (the default) follows Home Assistant's own language, so the card
+// matches the rest of the UI without anyone having to configure it.
+function ftLang(config, hass) {
+  const chosen = config && config.language;
+  if (chosen && chosen !== "auto" && I18N[chosen]) return chosen;
+  const haLang = (hass && (hass.language || (hass.locale && hass.locale.language))) || "en";
+  const short = String(haLang).slice(0, 2).toLowerCase();
+  return I18N[short] ? short : "en";
+}
+
+function ftT(config, hass, key, vars) {
+  const dict = I18N[ftLang(config, hass)] || I18N.en;
+  let out = dict[key] != null ? dict[key] : I18N.en[key];
+  if (out == null) return key;
+  if (vars) {
+    for (const name of Object.keys(vars)) out = out.split(`{${name}}`).join(vars[name]);
+  }
+  return out;
+}
+
 // Official Bambu Lab hex codes, pulled from their own filament hex-code-table
 // PDFs (store.bblcdn.com). Not exhaustive forever — Bambu adds colors over
 // time — but covers the common lines. Only used to pre-fill the Material/
@@ -54,14 +245,14 @@ const BAMBU_COLORS = {
 // the visual editor's checkbox list and nothing else — the card itself reads
 // the keys directly — so adding a section here is all it takes to expose it.
 const CARD_SECTIONS = [
-  { key: "show_title", label: "Titlu și subtitlu" },
-  { key: "show_stats", label: "Statistici (g total, stoc redus)" },
-  { key: "show_ams", label: "Încărcat acum (tăvile AMS)" },
-  { key: "show_loaded_manual", label: "Încărcat manual (din rezervă)" },
-  { key: "show_mapping", label: "Mapare manuală AMS" },
-  { key: "show_add", label: "Buton și formular „Adaugă bobină”" },
-  { key: "show_search", label: "Căutare, sortare și filtre pe material" },
-  { key: "show_shelf", label: "Raftul cu bobine" },
+  { key: "show_title", label: "sec_opt_title" },
+  { key: "show_stats", label: "sec_opt_stats" },
+  { key: "show_ams", label: "sec_opt_ams" },
+  { key: "show_loaded_manual", label: "sec_opt_manual" },
+  { key: "show_mapping", label: "sec_opt_mapping" },
+  { key: "show_add", label: "sec_opt_add" },
+  { key: "show_search", label: "sec_opt_search" },
+  { key: "show_shelf", label: "sec_opt_shelf" },
 ];
 
 const CARD_CSS = `
@@ -222,12 +413,30 @@ class FilamentTrackerCard extends HTMLElement {
     this._pendingTimer = null;
   }
 
+  _t(key, vars) {
+    return ftT(this._config, this._hass, key, vars);
+  }
+
+  _lang() {
+    return ftLang(this._config, this._hass);
+  }
+
+  // Status is stored in English by the backend; translate for display only.
+  _statusLabel(status) {
+    const key = STATUS_KEYS[status];
+    return key ? this._t(key) : status;
+  }
+
   setConfig(config) {
     this._config = config || {};
     // Lovelace calls this again on every keystroke in the edit dialog's
     // preview, so the visible sections have to follow immediately — not wait
     // for the next hass push, which may be seconds away on a quiet system.
     if (this._built) {
+      // The skeleton's labels are baked in at build time, so a language change
+      // means rebuilding it. Everything that survives a rebuild lives on the
+      // instance (sort, collapsed groups, active filter), not in the DOM.
+      if (this._lang() !== this._builtLang && this._hass) this._buildSkeleton();
       this._applyVisibility();
       if (this._hass) this._updateAll();
     }
@@ -263,7 +472,9 @@ class FilamentTrackerCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._built) this._buildSkeleton();
+    // With language: auto, the first hass is also what tells us which language
+    // to use — so a skeleton built before it may need rebuilding once.
+    if (!this._built || this._lang() !== this._builtLang) this._buildSkeleton();
     this._updateAll();
   }
 
@@ -282,62 +493,65 @@ class FilamentTrackerCard extends HTMLElement {
   // ---------- one-time DOM build ----------
   _buildSkeleton() {
     this._built = true;
+    this._builtLang = this._lang();
+    const t = (k, v) => esc(this._t(k, v));
+    // A language switch rebuilds the DOM, so carry over the two bits of state
+    // that live in it rather than on the instance.
+    const prevSearch = this.$ && this.$.search ? this.$.search.value : "";
     const root = this.shadowRoot;
     root.innerHTML = `<style>${CARD_CSS}</style><ha-card></ha-card>`;
     this._card = root.querySelector("ha-card");
     this._card.innerHTML = `
       <div class="header" id="ft-sec-header">
         <div class="title-wrap" id="ft-title-wrap">
-          <div class="title"><ha-icon icon="mdi:printer-3d-nozzle"></ha-icon>Filament Stock</div>
+          <div class="title"><ha-icon icon="mdi:printer-3d-nozzle"></ha-icon>${t("title")}</div>
           <div class="subtitle" id="ft-subtitle"></div>
         </div>
         <div class="stats" id="ft-stats"></div>
       </div>
 
       <div id="ft-sec-loaded">
-        <div class="section-label"><ha-icon icon="mdi:printer-3d" style="--mdc-icon-size:14px;"></ha-icon>Încărcat acum</div>
+        <div class="section-label"><ha-icon icon="mdi:printer-3d" style="--mdc-icon-size:14px;"></ha-icon>${t("sec_loaded_now")}</div>
         <div class="tray-rack" id="ft-loaded"></div>
       </div>
 
       <div id="ft-loaded-manual-wrap" hidden>
-        <div class="section-label"><ha-icon icon="mdi:swap-horizontal-bold" style="--mdc-icon-size:14px;"></ha-icon>Încărcat manual (din rezervă)</div>
+        <div class="section-label"><ha-icon icon="mdi:swap-horizontal-bold" style="--mdc-icon-size:14px;"></ha-icon>${t("sec_loaded_manual")}</div>
         <div class="tray-rack" id="ft-loaded-manual"></div>
       </div>
 
       <div id="ft-sec-mapping">
-        <div class="section-label"><ha-icon icon="mdi:swap-horizontal" style="--mdc-icon-size:14px;"></ha-icon>Mapare manuală AMS</div>
+        <div class="section-label"><ha-icon icon="mdi:swap-horizontal" style="--mdc-icon-size:14px;"></ha-icon>${t("sec_mapping")}</div>
         <div class="mapping-grid" id="ft-mapping"></div>
       </div>
 
       <div id="ft-sec-add">
-        <button class="add-toggle" id="ft-add-toggle"><ha-icon icon="mdi:plus-circle"></ha-icon>Adaugă bobină</button>
+        <button class="add-toggle" id="ft-add-toggle"><ha-icon icon="mdi:plus-circle"></ha-icon>${t("add_spool")}</button>
         <div class="add-form" id="ft-add-form" hidden style="margin-top:10px;">
           <div class="grid">
-            <div class="field"><label>Culoare Bambu (opțional)</label>
+            <div class="field"><label>${t("bambu_color")}</label>
               <select id="ft-bambu-line">
-                <option value="">— alege linia —</option>
+                <option value="">${t("choose_line")}</option>
               </select>
             </div>
             <div class="field"><label>&nbsp;</label>
-              <input type="text" id="ft-bambu-color" list="ft-bambu-color-list" placeholder="tastează sau alege..." disabled>
+              <input type="text" id="ft-bambu-color" list="ft-bambu-color-list" placeholder="${t("type_or_choose")}" disabled>
               <datalist id="ft-bambu-color-list"></datalist>
             </div>
           </div>
           <div class="grid" style="margin-top:8px;">
-            <div class="field"><label>Etichetă</label><input type="text" id="ft-in-label" placeholder="Esun PLA+ Cool Grey"></div>
-            <div class="field"><label>Material</label><input type="text" id="ft-in-material" placeholder="PLA"></div>
-            <div class="field"><label>Culoare (hex)</label><input type="text" id="ft-in-color" placeholder="#1E88E5" value="#888888"></div>
-            <div class="field"><label>Greutate totală (g)</label><input type="number" id="ft-in-full" value="1000" min="0"></div>
-            <div class="field"><label>Greutate rămasă (g)</label><input type="number" id="ft-in-remaining" value="1000" min="0"></div>
-            <div class="field"><label>Stare</label>
-              <select id="ft-in-status">
-                <option>Sealed</option><option>Opened</option><option>Empty</option>
-              </select>
+            <div class="field"><label>${t("f_label")}</label><input type="text" id="ft-in-label" placeholder="Esun PLA+ Cool Grey"></div>
+            <div class="field"><label>${t("f_material")}</label><input type="text" id="ft-in-material" placeholder="PLA"></div>
+            <div class="field"><label>${t("f_color")}</label><input type="text" id="ft-in-color" placeholder="#1E88E5" value="#888888"></div>
+            <div class="field"><label>${t("f_full")}</label><input type="number" id="ft-in-full" value="1000" min="0"></div>
+            <div class="field"><label>${t("f_remaining")}</label><input type="number" id="ft-in-remaining" value="1000" min="0"></div>
+            <div class="field"><label>${t("f_status")}</label>
+              <select id="ft-in-status">${statusOptions(this)}</select>
             </div>
           </div>
           <div class="actions">
-            <button class="btn ghost" id="ft-add-cancel">Anulează</button>
-            <button class="btn primary" id="ft-add-submit">Adaugă</button>
+            <button class="btn ghost" id="ft-add-cancel">${t("cancel")}</button>
+            <button class="btn primary" id="ft-add-submit">${t("add")}</button>
           </div>
         </div>
       </div>
@@ -345,26 +559,26 @@ class FilamentTrackerCard extends HTMLElement {
       <div class="editor-panel" id="ft-editor" hidden>
         <div class="who" id="ft-editor-who"></div>
         <div class="fields">
-          <div class="field"><label>Greutate rămasă (g)</label><input type="number" id="ft-editor-remaining" min="0"></div>
-          <div class="field"><label>Stare</label>
-            <select id="ft-editor-status"><option>Sealed</option><option>Opened</option><option>Empty</option></select>
+          <div class="field"><label>${t("f_remaining")}</label><input type="number" id="ft-editor-remaining" min="0"></div>
+          <div class="field"><label>${t("f_status")}</label>
+            <select id="ft-editor-status">${statusOptions(this)}</select>
           </div>
         </div>
         <div class="actions">
-          <button class="btn ghost" id="ft-editor-cancel">Anulează</button>
-          <button class="btn danger" id="ft-editor-delete">Șterge</button>
-          <button class="btn primary" id="ft-editor-save">Salvează</button>
+          <button class="btn ghost" id="ft-editor-cancel">${t("cancel")}</button>
+          <button class="btn danger" id="ft-editor-delete">${t("delete")}</button>
+          <button class="btn primary" id="ft-editor-save">${t("save")}</button>
         </div>
       </div>
 
       <div>
         <div id="ft-sec-search">
           <div class="toolbar">
-            <input type="text" id="ft-search" placeholder="Caută după nume sau culoare…">
+            <input type="text" id="ft-search" placeholder="${t("search_ph")}">
             <select id="ft-sort">
-              <option value="material">Sortează: Material</option>
-              <option value="name">Sortează: Nume</option>
-              <option value="amount">Sortează: Cantitate</option>
+              <option value="material">${t("sort_material")}</option>
+              <option value="name">${t("sort_name")}</option>
+              <option value="amount">${t("sort_amount")}</option>
             </select>
           </div>
           <div class="chip-row" id="ft-chips" style="margin-top:8px;"></div>
@@ -412,6 +626,9 @@ class FilamentTrackerCard extends HTMLElement {
       chips: this._card.querySelector("#ft-chips"),
       shelf: this._card.querySelector("#ft-shelf"),
     };
+
+    this.$.search.value = prevSearch;
+    this.$.sort.value = this._sort;
 
     this.$.addToggle.addEventListener("click", () => {
       const hidden = this.$.addForm.hasAttribute("hidden");
@@ -485,7 +702,7 @@ class FilamentTrackerCard extends HTMLElement {
       const del = e.target.closest(".del");
       if (del) {
         e.stopPropagation();
-        if (confirm("Ștergi această bobină?")) {
+        if (confirm(this._t("confirm_delete"))) {
           this._callService("delete_spool", { id: parseInt(del.dataset.id, 10) });
         }
         return;
@@ -506,7 +723,7 @@ class FilamentTrackerCard extends HTMLElement {
         // give it a way out instead of pulsing forever. Dismissing it only
         // clears the local placeholder; if the write did land server-side
         // after all, it'll show up normally on the next state push.
-        if (confirm("Nu s-a confirmat încă adăugarea. Renunți la această bobină?")) {
+        if (confirm(this._t("confirm_discard_pending"))) {
           this._clearPending();
           this._renderShelf();
         }
@@ -639,6 +856,7 @@ class FilamentTrackerCard extends HTMLElement {
   }
 
   _updateStats() {
+    const t = (k, v) => esc(this._t(k, v));
     const attrs = this._spoolsAttr();
     const stock = attrs && attrs.total_remaining != null ? attrs.total_remaining : null;
     const ams = Math.round(this._amsLoadedGrams());
@@ -647,16 +865,19 @@ class FilamentTrackerCard extends HTMLElement {
     const total = stock != null ? stock + ams : ams > 0 ? ams : null;
     const low = attrs ? attrs.low_stock_count : null;
     this.$.subtitle.textContent = attrs
-      ? `${(attrs.spools || []).length} bobine urmărite`
-      : "Filament Tracker neconfigurat încă";
+      ? this._t("subtitle_tracked", { n: (attrs.spools || []).length })
+      : this._t("not_configured");
     const breakdown =
       ams > 0
-        ? `${(stock || 0).toLocaleString()} g în rezervă + ${ams.toLocaleString()} g în AMS (estimat din procentul rămas)`
-        : "Filament în rezervă";
+        ? this._t("tip_breakdown", {
+            stock: (stock || 0).toLocaleString(),
+            ams: ams.toLocaleString(),
+          })
+        : this._t("tip_stock_only");
     this.$.stats.innerHTML = `
-      <div class="stat-pill" title="${esc(breakdown)}"><span class="n">${total != null ? total.toLocaleString() : "—"}</span><span class="l">g total</span></div>
-      ${ams > 0 ? `<div class="stat-pill" title="Estimat din procentul rămas raportat de AMS"><span class="n">${ams.toLocaleString()}</span><span class="l">g în AMS</span></div>` : ""}
-      <div class="stat-pill${low > 0 ? " warn" : ""}" title="Bobine din rezervă sub prag — nu include AMS"><span class="n">${low != null ? low : "—"}</span><span class="l">stoc redus</span></div>
+      <div class="stat-pill" title="${esc(breakdown)}"><span class="n">${total != null ? total.toLocaleString() : "—"}</span><span class="l">${t("stat_total")}</span></div>
+      ${ams > 0 ? `<div class="stat-pill" title="${t("tip_ams")}"><span class="n">${ams.toLocaleString()}</span><span class="l">${t("stat_ams")}</span></div>` : ""}
+      <div class="stat-pill${low > 0 ? " warn" : ""}" title="${t("tip_low")}"><span class="n">${low != null ? low : "—"}</span><span class="l">${t("stat_low")}</span></div>
     `;
   }
 
@@ -704,14 +925,14 @@ class FilamentTrackerCard extends HTMLElement {
       <div class="slot-label">${esc(label)}</div>
       <div class="square" style="width:44px;height:44px;background:${info.empty ? "var(--ft-track)" : esc(info.color)};"></div>
       <div class="bar" style="width:44px;">${info.empty ? "" : `<i style="width:${info.pct != null ? info.pct : 0}%;background:var(--ft-accent);"></i>`}</div>
-      <div class="mat">${info.empty ? "Gol" : esc(info.type)}</div>
+      <div class="mat">${info.empty ? esc(this._t("tray_empty")) : esc(info.type)}</div>
     </div>`;
   }
 
   _updateLoaded() {
     const { trays, externals } = this._discoverAms();
     if (trays.length === 0 && externals.length === 0) {
-      this.$.loaded.innerHTML = `<div class="empty-msg" style="padding:8px;">Niciun senzor AMS găsit — instalează ha-bambulab dacă ai o imprimantă Bambu conectată.</div>`;
+      this.$.loaded.innerHTML = `<div class="empty-msg" style="padding:8px;">${esc(this._t("no_ams"))}</div>`;
       this._discoveredSlots = [];
       return;
     }
@@ -735,7 +956,7 @@ class FilamentTrackerCard extends HTMLElement {
   _updateMapping() {
     const attrs = this._spoolsAttr();
     if (!attrs) {
-      this.$.mapping.innerHTML = `<div class="empty-msg" style="padding:8px;">Filament Tracker neconfigurat încă.</div>`;
+      this.$.mapping.innerHTML = `<div class="empty-msg" style="padding:8px;">${esc(this._t("not_configured"))}</div>`;
       return;
     }
     const mappings = attrs.mappings || {};
@@ -743,10 +964,10 @@ class FilamentTrackerCard extends HTMLElement {
     const slots =
       this._discoveredSlots && this._discoveredSlots.length > 0
         ? this._discoveredSlots
-        : [1, 2, 3, 4].map((i) => ({ entityId: null, label: `Slot ${i}` }));
+        : [1, 2, 3, 4].map((i) => ({ entityId: null, label: this._t("slot_n", { n: i }) }));
 
     const optionsHtml =
-      `<option value="">— Niciuna / RFID auto —</option>` +
+      `<option value="">${esc(this._t("map_none"))}</option>` +
       spools.map((s) => `<option value="${s.id}">${esc(s.label)}</option>`).join("");
 
     this.$.mapping.innerHTML = slots
@@ -791,11 +1012,11 @@ class FilamentTrackerCard extends HTMLElement {
       if (!spool) return;
       const slotNum = parseInt(slotStr, 10);
       const slotInfo = this._discoveredSlots && this._discoveredSlots[slotNum - 1];
-      const slotLabel = slotInfo ? slotInfo.label : `Slot ${slotNum}`;
+      const slotLabel = slotInfo ? slotInfo.label : this._t("slot_n", { n: slotNum });
       const rem = parseFloat(spool.weight_remaining) || 0;
       const full = parseFloat(spool.weight_full) || 0;
       const pct = full > 0 ? Math.round((rem / full) * 100) : 0;
-      h += `<div class="tray-tile" data-id="${spool.id}" style="cursor:pointer;" title="Apasă pentru a edita sau demapa">
+      h += `<div class="tray-tile" data-id="${spool.id}" style="cursor:pointer;" title="${esc(this._t("manual_tile_tip"))}">
         <div class="slot-label">${esc(slotLabel)}</div>
         <div class="square" style="width:44px;height:44px;background:${esc(spool.color_hex || "#888888")};"></div>
         <div class="bar" style="width:44px;"><i style="width:${pct}%;background:var(--ft-accent);"></i></div>
@@ -824,17 +1045,17 @@ class FilamentTrackerCard extends HTMLElement {
 
     if (spools === null) {
       this.$.chips.innerHTML = "";
-      this.$.shelf.innerHTML = `<div class="empty-msg">Filament Tracker nu este configurat — adaugă integrarea și restart HA.</div>`;
+      this.$.shelf.innerHTML = `<div class="empty-msg">${esc(this._t("empty_not_configured"))}</div>`;
       return;
     }
     if (spools.length === 0 && mappedIds.size > 0 && (attrs.spools || []).length > 0) {
       this.$.chips.innerHTML = "";
-      this.$.shelf.innerHTML = `<div class="empty-msg">Toate bobinele sunt încărcate acum — vezi "Încărcat manual" mai sus.</div>`;
+      this.$.shelf.innerHTML = `<div class="empty-msg">${esc(this._t("empty_all_loaded"))}</div>`;
       return;
     }
     if (spools.length === 0) {
       this.$.chips.innerHTML = "";
-      this.$.shelf.innerHTML = `<div class="empty-msg">Nicio bobină încă — adaugă una mai sus.</div>`;
+      this.$.shelf.innerHTML = `<div class="empty-msg">${esc(this._t("empty_none"))}</div>`;
       return;
     }
 
@@ -878,7 +1099,7 @@ class FilamentTrackerCard extends HTMLElement {
       h += `<div class="material-group${collapsedClass}" data-material="${esc(material)}">
         <div class="material-header">
           <span class="name"><ha-icon icon="mdi:chevron-down"></ha-icon>${esc(material)}</span>
-          <span class="meta">${list.length} bobine · ${Math.round(matTotal)}g</span>
+          <span class="meta">${esc(this._t("group_meta", { n: list.length, g: Math.round(matTotal) }))}</span>
         </div>`;
       for (let i = 0; i < list.length; i += 10) {
         const row = list.slice(i, i + 10);
@@ -887,7 +1108,7 @@ class FilamentTrackerCard extends HTMLElement {
       h += `</div>`;
     });
 
-    this.$.shelf.innerHTML = h || `<div class="empty-msg">Nicio bobină nu corespunde filtrului.</div>`;
+    this.$.shelf.innerHTML = h || `<div class="empty-msg">${esc(this._t("empty_filter"))}</div>`;
   }
 
   _spoolTile(s, threshold) {
@@ -899,7 +1120,9 @@ class FilamentTrackerCard extends HTMLElement {
     const bg = isEmpty ? "var(--ft-track)" : esc(s.color_hex || "#888888");
     const barColor = low ? "var(--ft-warn)" : "var(--ft-accent)";
     const pendingClass = s._pending ? " pending" : "";
-    const title = s._pending ? `${esc(s.label)} — se salvează…` : `${esc(s.label)} — ${esc(s.status)} — ${rem}g / ${full}g (${pct}%)`;
+    const title = s._pending
+      ? `${esc(s.label)} — ${esc(this._t("saving_suffix"))}`
+      : `${esc(s.label)} — ${esc(this._statusLabel(s.status))} — ${rem}g / ${full}g (${pct}%)`;
     return `<div class="spool-slot${pendingClass}" data-id="${s.id}" title="${title}">
       <div class="del" data-id="${s.id}">✕</div>
       <div class="square" style="width:52px;height:52px;background:${bg};"></div>
@@ -950,13 +1173,13 @@ class FilamentTrackerCard extends HTMLElement {
       this._pendingTimer = null;
       if (!this._pendingSpool) return;
       console.warn("filament-tracker-card: add_spool never showed up in sensor.filament_spools_db");
-      this._pendingSpool.label += " (neconfirmat)";
+      this._pendingSpool.label += this._t("unconfirmed_suffix");
       this._renderShelf();
     }, 10000);
     this._renderShelf();
 
     this.$.addSubmit.disabled = true;
-    this.$.addSubmit.textContent = "Se adaugă…";
+    this.$.addSubmit.textContent = this._t("adding");
     try {
       await this._hass.callService("filament_tracker", "add_spool", data);
     } catch (e) {
@@ -964,7 +1187,7 @@ class FilamentTrackerCard extends HTMLElement {
       this._clearPending();
     }
     this.$.addSubmit.disabled = false;
-    this.$.addSubmit.textContent = "Adaugă";
+    this.$.addSubmit.textContent = this._t("add");
     this._resolvePending();
     this._renderShelf();
   }
@@ -1012,7 +1235,7 @@ class FilamentTrackerCard extends HTMLElement {
 
   _deleteFromEditor() {
     if (this._editingId == null) return;
-    if (confirm("Ștergi această bobină?")) {
+    if (confirm(this._t("confirm_delete"))) {
       this._callService("delete_spool", { id: this._editingId });
     }
     this._closeEditor();
@@ -1037,21 +1260,33 @@ class FilamentTrackerCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    // Only re-render when the resolved language actually changed. This setter
+    // fires on every state change in Home Assistant, and a blanket re-render
+    // would blow away focus while someone is typing in the number fields.
+    if (this._config && this._renderedLang !== ftLang(this._config, hass)) this._render();
+  }
+
+  _t(key, vars) {
+    return ftT(this._config, this._hass, key, vars);
   }
 
   _render() {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    this._renderedLang = ftLang(this._config, this._hass);
+    const t = (k, v) => esc(this._t(k, v));
     const current = this._config.low_stock_threshold != null ? this._config.low_stock_threshold : "";
     const amsSize = this._config.ams_spool_size != null ? this._config.ams_spool_size : "";
+    const lang = this._config.language || "auto";
     this.shadowRoot.innerHTML = `
       <style>
         .row { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; }
         label { font-size: 13px; font-weight: 500; color: var(--primary-text-color); }
-        input {
+        input, select {
           font: inherit; padding: 8px 10px; border-radius: 8px;
           border: 1px solid var(--divider-color); background: var(--card-background-color);
           color: var(--primary-text-color);
         }
+        select { cursor: pointer; }
         .hint { font-size: 11px; color: var(--secondary-text-color); }
         .group-title {
           font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
@@ -1067,30 +1302,47 @@ class FilamentTrackerCardEditor extends HTMLElement {
         .toggle input { width: 17px; height: 17px; margin: 0; padding: 0; accent-color: var(--primary-color); cursor: pointer; }
         .divider { height: 1px; background: var(--divider-color); margin: 12px 0 4px; }
       </style>
-      <div class="group-title">Ce se afișează</div>
+      <div class="group-title">${t("ed_what")}</div>
       <div class="toggles">
         ${CARD_SECTIONS.map(
           (s) => `<label class="toggle">
             <input type="checkbox" data-key="${esc(s.key)}"${this._config[s.key] !== false ? " checked" : ""}>
-            <span>${esc(s.label)}</span>
+            <span>${t(s.label)}</span>
           </label>`
         ).join("")}
       </div>
-      <div class="hint">Debifează ce nu-ți trebuie — de exemplu tăvile AMS, dacă le ai deja pe alt card.</div>
+      <div class="hint">${t("ed_hint_sections")}</div>
 
       <div class="divider"></div>
-      <div class="group-title">Setări</div>
+      <div class="group-title">${t("ed_settings")}</div>
       <div class="row">
-        <label>Prag stoc redus (g) — opțional</label>
-        <input type="number" id="threshold" min="0" value="${esc(current)}" placeholder="folosește pragul din integrare">
-        <div class="hint">Lasă gol ca să folosești pragul din Settings → Devices &amp; Services → Filament Tracker → Configure.</div>
+        <label>${t("ed_language")}</label>
+        <select id="language">
+          <option value="auto"${lang === "auto" ? " selected" : ""}>${t("ed_lang_auto")}</option>
+          ${LANGUAGES.map(
+            (l) =>
+              `<option value="${esc(l.value)}"${lang === l.value ? " selected" : ""}>${esc(l.label)}</option>`
+          ).join("")}
+        </select>
       </div>
       <div class="row">
-        <label>Greutate bobină AMS (g) — opțional</label>
+        <label>${t("ed_threshold")}</label>
+        <input type="number" id="threshold" min="0" value="${esc(current)}" placeholder="${t("ed_threshold_ph")}">
+        <div class="hint">${t("ed_threshold_hint")}</div>
+      </div>
+      <div class="row">
+        <label>${t("ed_ams_size")}</label>
         <input type="number" id="ams-size" min="1" value="${esc(amsSize)}" placeholder="1000">
-        <div class="hint">Folosită ca să estimezi câte grame sunt în AMS, pornind de la procentul rămas. Bobinele Bambu cu RFID își raportează singure greutatea; asta se aplică doar celorlalte.</div>
+        <div class="hint">${t("ed_ams_hint")}</div>
       </div>
     `;
+
+    this.shadowRoot.querySelector("#language").addEventListener("change", (e) => {
+      const newConfig = { ...this._config };
+      if (e.target.value === "auto") delete newConfig.language;
+      else newConfig.language = e.target.value;
+      this._emit(newConfig);
+    });
 
     this.shadowRoot.querySelectorAll(".toggle input[data-key]").forEach((box) => {
       box.addEventListener("change", (e) => {
