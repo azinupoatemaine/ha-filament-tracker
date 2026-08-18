@@ -176,6 +176,9 @@ const CARD_CSS = `
     justify-content: center; font-size: 9px; color: var(--ft-ink-2); z-index: 2;
   }
   .spool-slot .cap { font-size: 10.5px; color: var(--ft-ink-2); text-align: center; line-height: 1.2; max-width: 68px; height: 2.4em; overflow: hidden; }
+  .spool-slot.pending { opacity: .55; cursor: default; animation: ft-pending-pulse 1.1s ease-in-out infinite; }
+  .spool-slot.pending .del { display: none; }
+  @keyframes ft-pending-pulse { 0%, 100% { opacity: .4; } 50% { opacity: .75; } }
 
   /* Editor panel */
   .editor-panel {
@@ -201,6 +204,7 @@ class FilamentTrackerCard extends HTMLElement {
     this._sort = "material";
     this._editingId = null;
     this._overrideDbState = null;
+    this._pendingSpool = null;
   }
 
   setConfig(config) {
@@ -438,7 +442,7 @@ class FilamentTrackerCard extends HTMLElement {
         return;
       }
       const tile = e.target.closest(".spool-slot");
-      if (tile) {
+      if (tile && !tile.classList.contains("pending")) {
         this._openEditor(parseInt(tile.dataset.id, 10));
       }
     });
@@ -465,7 +469,18 @@ class FilamentTrackerCard extends HTMLElement {
     // otherwise). Whichever snapshot is actually newer wins, so this heals
     // itself the moment a genuine live push does arrive.
     const best = overrideTime > liveTime ? override : live;
-    return best && best.attributes ? best.attributes : null;
+    const attrs = best && best.attributes ? best.attributes : null;
+    if (!attrs) return attrs;
+
+    // Show a just-submitted spool immediately, before the round trip through
+    // Home Assistant's service call (which can take anywhere from instant to
+    // several seconds depending on server load) has confirmed it. _submitAdd
+    // clears this the moment the real write is confirmed, so the temporary
+    // copy is only ever visible during that gap.
+    if (this._pendingSpool) {
+      return { ...attrs, spools: [...(attrs.spools || []), this._pendingSpool] };
+    }
+    return attrs;
   }
 
   // Call a filament_tracker service, then force-fetch the entity's current
@@ -741,7 +756,9 @@ class FilamentTrackerCard extends HTMLElement {
     const low = !isEmpty && rem <= threshold;
     const bg = isEmpty ? "var(--ft-track)" : esc(s.color_hex || "#888888");
     const barColor = low ? "var(--ft-warn)" : "var(--ft-accent)";
-    return `<div class="spool-slot" data-id="${s.id}" title="${esc(s.label)} — ${esc(s.status)} — ${rem}g / ${full}g (${pct}%)">
+    const pendingClass = s._pending ? " pending" : "";
+    const title = s._pending ? `${esc(s.label)} — se salvează…` : `${esc(s.label)} — ${esc(s.status)} — ${rem}g / ${full}g (${pct}%)`;
+    return `<div class="spool-slot${pendingClass}" data-id="${s.id}" title="${title}">
       <div class="del" data-id="${s.id}">✕</div>
       <div class="square" style="width:52px;height:52px;background:${bg};"></div>
       <div class="bar" style="width:52px;"><i style="width:${isEmpty ? 0 : pct}%;background:${barColor};"></i></div>
@@ -771,20 +788,24 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.bambuColorList.innerHTML = "";
     this.$.addForm.setAttribute("hidden", "");
 
+    // Show it on the shelf right now, dimmed and unclickable, instead of
+    // making the click wait on the round trip through Home Assistant's
+    // service call — that trip's actual duration depends on server load and
+    // isn't something this card can guarantee is fast. _spoolsAttr() splices
+    // this in everywhere until the real write is confirmed below.
+    this._activeMaterial = null;
+    this.$.search.value = "";
+    this._collapsed.clear();
+    this._pendingSpool = { ...data, id: -Date.now(), label: data.label || "Spool", material: data.material || "Altele", _pending: true };
+    this._renderShelf();
+
     this.$.addSubmit.disabled = true;
     this.$.addSubmit.textContent = "Se adaugă…";
     await this._callServiceAndRefresh("add_spool", data);
     this.$.addSubmit.disabled = false;
     this.$.addSubmit.textContent = "Adaugă";
 
-    // A newly added spool must be visible right away no matter what search
-    // text, material-chip filter, or collapsed group was left over from
-    // before — none of that resets on a live update, only on a full page
-    // reload, which is why a reload could make it "appear" when nothing was
-    // actually wrong with the add itself.
-    this._activeMaterial = null;
-    this.$.search.value = "";
-    this._collapsed.clear();
+    this._pendingSpool = null;
     this._renderShelf();
   }
 
