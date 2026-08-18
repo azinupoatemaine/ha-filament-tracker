@@ -176,7 +176,7 @@ const CARD_CSS = `
     justify-content: center; font-size: 9px; color: var(--ft-ink-2); z-index: 2;
   }
   .spool-slot .cap { font-size: 10.5px; color: var(--ft-ink-2); text-align: center; line-height: 1.2; max-width: 68px; height: 2.4em; overflow: hidden; }
-  .spool-slot.pending { opacity: .55; cursor: default; animation: ft-pending-pulse 1.1s ease-in-out infinite; }
+  .spool-slot.pending { opacity: .55; cursor: pointer; animation: ft-pending-pulse 1.1s ease-in-out infinite; }
   .spool-slot.pending .del { display: none; }
   @keyframes ft-pending-pulse { 0%, 100% { opacity: .4; } 50% { opacity: .75; } }
 
@@ -442,9 +442,19 @@ class FilamentTrackerCard extends HTMLElement {
         return;
       }
       const tile = e.target.closest(".spool-slot");
-      if (tile && !tile.classList.contains("pending")) {
-        this._openEditor(parseInt(tile.dataset.id, 10));
+      if (!tile) return;
+      if (tile.classList.contains("pending")) {
+        // A placeholder that never got confirmed shouldn't be a dead end —
+        // give it a way out instead of pulsing forever. Dismissing it only
+        // clears the local placeholder; if the write did land server-side
+        // after all, it'll show up normally on the next real refresh.
+        if (confirm("Nu s-a confirmat încă adăugarea. Renunți la această bobină?")) {
+          this._pendingSpool = null;
+          this._renderShelf();
+        }
+        return;
       }
+      this._openEditor(parseInt(tile.dataset.id, 10));
     });
   }
 
@@ -540,7 +550,18 @@ class FilamentTrackerCard extends HTMLElement {
 
   async _forceRefresh() {
     try {
-      this._overrideDbState = await this._hass.callApi("GET", "states/sensor.filament_spools_db");
+      // The cache-buster matters here: repeated polling proved the backend
+      // write itself completes almost immediately, yet this exact GET can
+      // still return pre-write data for seconds afterward — the signature
+      // of something between the browser and HA (a reverse proxy, a
+      // Cloudflare/Nabu Casa tunnel, etc.) caching the response by URL. HA
+      // itself sends no cache headers on this endpoint, so nothing here
+      // should be cached, but a query string that changes every call
+      // defeats any URL-keyed cache regardless of where it lives.
+      this._overrideDbState = await this._hass.callApi(
+        "GET",
+        `states/sensor.filament_spools_db?_=${Date.now()}`
+      );
       this._updateAll();
     } catch (e) {
       // Best-effort — if this fails, the normal reactive hass push (when it
