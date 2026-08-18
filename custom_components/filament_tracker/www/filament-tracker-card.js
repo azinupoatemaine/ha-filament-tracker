@@ -750,7 +750,7 @@ class FilamentTrackerCard extends HTMLElement {
   }
 
   // ---------- add form ----------
-  _submitAdd() {
+  async _submitAdd() {
     const data = {
       label: this.$.inLabel.value,
       material: this.$.inMaterial.value,
@@ -759,7 +759,6 @@ class FilamentTrackerCard extends HTMLElement {
       weight_remaining: parseFloat(this.$.inRemaining.value) || 0,
       status: this.$.inStatus.value,
     };
-    this._callServiceAndRefresh("add_spool", data);
     this.$.inLabel.value = "";
     this.$.inMaterial.value = "";
     this.$.inColor.value = "#888888";
@@ -771,6 +770,22 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.bambuColor.setAttribute("disabled", "");
     this.$.bambuColorList.innerHTML = "";
     this.$.addForm.setAttribute("hidden", "");
+
+    this.$.addSubmit.disabled = true;
+    this.$.addSubmit.textContent = "Se adaugă…";
+    await this._callServiceAndRefresh("add_spool", data);
+    this.$.addSubmit.disabled = false;
+    this.$.addSubmit.textContent = "Adaugă";
+
+    // A newly added spool must be visible right away no matter what search
+    // text, material-chip filter, or collapsed group was left over from
+    // before — none of that resets on a live update, only on a full page
+    // reload, which is why a reload could make it "appear" when nothing was
+    // actually wrong with the add itself.
+    this._activeMaterial = null;
+    this.$.search.value = "";
+    this._collapsed.clear();
+    this._renderShelf();
   }
 
   // ---------- editor panel ----------
