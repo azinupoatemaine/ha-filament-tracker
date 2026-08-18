@@ -458,7 +458,9 @@ class FilamentTrackerCard extends HTMLElement {
     this._updateEditorLive();
   }
 
-  _spoolsAttr() {
+  // The real entity data, no optimistic entries mixed in — used whenever
+  // code needs to check what the backend has actually confirmed.
+  _rawSpoolsAttr() {
     const live = this._hass.states["sensor.filament_spools_db"];
     const liveTime = live ? Date.parse(live.last_updated || live.last_changed || 0) || 0 : 0;
     const override = this._overrideDbState;
@@ -469,7 +471,11 @@ class FilamentTrackerCard extends HTMLElement {
     // otherwise). Whichever snapshot is actually newer wins, so this heals
     // itself the moment a genuine live push does arrive.
     const best = overrideTime > liveTime ? override : live;
-    const attrs = best && best.attributes ? best.attributes : null;
+    return best && best.attributes ? best.attributes : null;
+  }
+
+  _spoolsAttr() {
+    const attrs = this._rawSpoolsAttr();
     if (!attrs) return attrs;
 
     // Show a just-submitted spool immediately, before the round trip through
@@ -498,6 +504,38 @@ class FilamentTrackerCard extends HTMLElement {
     console.info(
       `filament-tracker-card: ${service} — callService ${(t1 - t0).toFixed(0)}ms, forceRefresh ${(t2 - t1).toFixed(0)}ms, total ${(t2 - t0).toFixed(0)}ms`
     );
+  }
+
+  // Like _callServiceAndRefresh, but for add specifically: doesn't trust a
+  // single post-write fetch, because that has proven to sometimes still
+  // return pre-write data even though the write itself already succeeded
+  // (confirmed by it always being there after a full page reload). Instead
+  // it re-fetches and checks isConfirmed(attrs) until it's actually true,
+  // backing off between tries, and reports how many tries it took.
+  async _callServiceAndRefreshUntil(service, data, isConfirmed, { retries = 8, delayMs = 300 } = {}) {
+    const t0 = performance.now();
+    try {
+      await this._hass.callService("filament_tracker", service, data);
+    } catch (e) {
+      console.error("filament-tracker-card: service call failed", service, e);
+      await this._forceRefresh();
+      return { confirmed: false, attempts: 0 };
+    }
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      await this._forceRefresh();
+      const attrs = this._rawSpoolsAttr();
+      if (isConfirmed(attrs)) {
+        console.info(
+          `filament-tracker-card: ${service} confirmed after ${attempt} fetch(es), ${(performance.now() - t0).toFixed(0)}ms total`
+        );
+        return { confirmed: true, attempts: attempt };
+      }
+      if (attempt < retries) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    console.warn(
+      `filament-tracker-card: ${service} — backend never reflected the write after ${retries} fetches over ${(performance.now() - t0).toFixed(0)}ms`
+    );
+    return { confirmed: false, attempts: retries };
   }
 
   async _forceRefresh() {
@@ -799,6 +837,7 @@ class FilamentTrackerCard extends HTMLElement {
     // service call — that trip's actual duration depends on server load and
     // isn't something this card can guarantee is fast. _spoolsAttr() splices
     // this in everywhere until the real write is confirmed below.
+    const countBefore = (this._rawSpoolsAttr()?.spools || []).length;
     this._activeMaterial = null;
     this.$.search.value = "";
     this._collapsed.clear();
@@ -807,11 +846,27 @@ class FilamentTrackerCard extends HTMLElement {
 
     this.$.addSubmit.disabled = true;
     this.$.addSubmit.textContent = "Se adaugă…";
-    await this._callServiceAndRefresh("add_spool", data);
+    // Don't trust a single post-write fetch — poll until the spool count
+    // actually goes up. A write that's real but not immediately visible on
+    // the first read is exactly the failure mode that made the old
+    // single-fetch version flash the placeholder and then silently revert
+    // to pre-add data.
+    const { confirmed } = await this._callServiceAndRefreshUntil(
+      "add_spool",
+      data,
+      (attrs) => (attrs?.spools || []).length > countBefore
+    );
     this.$.addSubmit.disabled = false;
     this.$.addSubmit.textContent = "Adaugă";
 
-    this._pendingSpool = null;
+    if (confirmed) {
+      this._pendingSpool = null;
+    } else {
+      // Never silently vanish it — leave the dimmed placeholder up so it's
+      // obvious something is still pending rather than looking like the add
+      // was lost, and keep it out of the shelf's own material/search filters.
+      this._pendingSpool.label += " (se confirmă încă…)";
+    }
     this._renderShelf();
   }
 
