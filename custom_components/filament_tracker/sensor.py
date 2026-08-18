@@ -48,7 +48,7 @@ class FilamentSpoolsSensor(SensorEntity):
         self.async_write_ha_state()
 
     def _refresh(self) -> None:
-        data = self.hass.data[DOMAIN][self._entry.entry_id]
+        data = self.hass.data[DOMAIN]["shared"]
         spools: list[dict] = data["spools"]
         mappings: dict = data.get("mappings", {})
         threshold = self._threshold()
