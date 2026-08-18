@@ -9,5 +9,15 @@
     "abort": {
       "already_configured": "Filament Tracker is already set up."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Filament Tracker settings",
+        "data": {
+          "low_stock_threshold": "Low-stock threshold (g)"
+        }
+      }
+    }
   }
 }

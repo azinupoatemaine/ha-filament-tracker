@@ -83,3 +83,25 @@ update_spool:
             - Sealed
             - Opened
             - Empty
+
+set_slot_mapping:
+  name: Set AMS slot mapping
+  description: Say which backstock spool (if any) is physically loaded in a given manual AMS slot, for auto-deduct.
+  fields:
+    slot:
+      name: Slot number
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 8
+          mode: box
+    spool_id:
+      name: Spool ID
+      description: Leave empty to clear the mapping (RFID auto-tracked / nothing manual loaded).
+      example: 3
+      selector:
+        number:
+          min: 0
+          mode: box

@@ -157,7 +157,6 @@ class FilamentTrackerCard extends HTMLElement {
     this._activeMaterial = null;
     this._sort = "material";
     this._editingId = null;
-    this._lastOptionsSig = "";
   }
 
   setConfig(config) {
@@ -176,6 +175,10 @@ class FilamentTrackerCard extends HTMLElement {
 
   static getStubConfig() {
     return {};
+  }
+
+  static getConfigElement() {
+    return document.createElement("filament-tracker-card-editor");
   }
 
   // ---------- one-time DOM build ----------
@@ -303,12 +306,11 @@ class FilamentTrackerCard extends HTMLElement {
 
     // Event delegation for dynamically-rebuilt sections.
     this.$.mapping.addEventListener("change", (e) => {
-      const sel = e.target.closest("select[data-entity]");
+      const sel = e.target.closest("select[data-slot]");
       if (!sel) return;
-      this._hass.callService("input_select", "select_option", {
-        entity_id: sel.dataset.entity,
-        option: sel.value,
-      });
+      const data = { slot: parseInt(sel.dataset.slot, 10) };
+      if (sel.value !== "") data.spool_id = parseInt(sel.value, 10);
+      this._hass.callService("filament_tracker", "set_slot_mapping", data);
     });
     this.$.chips.addEventListener("click", (e) => {
       const chip = e.target.closest(".chip");
@@ -359,8 +361,8 @@ class FilamentTrackerCard extends HTMLElement {
     if (this._config && this._config.low_stock_threshold != null) {
       return parseFloat(this._config.low_stock_threshold);
     }
-    const t = this._hass.states["input_number.filament_low_stock_threshold"];
-    return t ? parseFloat(t.state) : 100;
+    const attrs = this._spoolsAttr();
+    return attrs && attrs.threshold != null ? attrs.threshold : 100;
   }
 
   _updateStats() {
@@ -376,63 +378,107 @@ class FilamentTrackerCard extends HTMLElement {
     `;
   }
 
+  // Auto-discovery: any ha-bambulab printer exposes sensor.<prefix>_ams_<unit>_tray_<slot>
+  // and sensor.<prefix>_external_spool. No configuration, no template-sensor package —
+  // just pattern-match whatever's already in the state machine.
+  _discoverAms() {
+    const trayRe = /^sensor\.(.+)_ams_(\d+)_tray_(\d+)$/;
+    const extRe = /^sensor\.(.+)_external_spool$/;
+    const trays = [];
+    const externals = [];
+    for (const entityId of Object.keys(this._hass.states)) {
+      const tm = entityId.match(trayRe);
+      if (tm) {
+        trays.push({ entityId, prefix: tm[1], unit: parseInt(tm[2], 10), tray: parseInt(tm[3], 10) });
+        continue;
+      }
+      const em = entityId.match(extRe);
+      if (em) externals.push({ entityId, prefix: em[1] });
+    }
+    trays.sort((a, b) => a.prefix.localeCompare(b.prefix) || a.unit - b.unit || a.tray - b.tray);
+    return { trays, externals };
+  }
+
+  _readRawTray(entityId) {
+    const st = this._hass.states[entityId];
+    if (!st) return { empty: true };
+    const stateVal = st.state;
+    const empty = !stateVal || ["unknown", "unavailable", "Empty"].includes(stateVal);
+    const attrs = st.attributes || {};
+    const type = attrs.tray_type || attrs.type || stateVal;
+    let color = attrs.tray_color || attrs.color || null;
+    if (color && !String(color).startsWith("#")) color = "#" + color;
+    const remainRaw = attrs.remain;
+    const pct = remainRaw != null && parseInt(remainRaw, 10) >= 0 ? parseInt(remainRaw, 10) : null;
+    return { empty, type, color: color || "#888888", pct };
+  }
+
+  _trayTile(label, info) {
+    return `<div class="tray-tile">
+      <div class="slot-label">${esc(label)}</div>
+      <div class="square" style="width:44px;height:44px;background:${info.empty ? "var(--ft-track)" : esc(info.color)};"></div>
+      <div class="bar" style="width:44px;">${info.empty ? "" : `<i style="width:${info.pct != null ? info.pct : 0}%;background:var(--ft-accent);"></i>`}</div>
+      <div class="mat">${info.empty ? "Gol" : esc(info.type)}</div>
+    </div>`;
+  }
+
   _updateLoaded() {
-    const slots = [
-      { key: "sensor.ams_1_tray_1_live", name: "AMS T1" },
-      { key: "sensor.ams_1_tray_2_live", name: "AMS T2" },
-      { key: "sensor.ams_1_tray_3_live", name: "AMS T3" },
-      { key: "sensor.ams_1_tray_4_live", name: "AMS T4" },
-      { key: "sensor.external_spool_live", name: "Extern" },
-    ];
+    const { trays, externals } = this._discoverAms();
+    if (trays.length === 0 && externals.length === 0) {
+      this.$.loaded.innerHTML = `<div class="empty-msg" style="padding:8px;">Niciun senzor AMS găsit — instalează ha-bambulab dacă ai o imprimantă Bambu conectată.</div>`;
+      this._discoveredSlots = [];
+      return;
+    }
     let h = "";
-    let any = false;
-    slots.forEach((s) => {
-      const st = this._hass.states[s.key];
-      if (st) any = true;
-      const empty = !st || ["Empty", "unavailable", "unknown"].includes(st.state);
-      const color = st && st.attributes && st.attributes.color_hex ? st.attributes.color_hex : "var(--ft-track)";
-      const pct = st && st.attributes && st.attributes.percent_remaining != null ? st.attributes.percent_remaining : null;
-      const mat = st ? st.state : "—";
-      h += `<div class="tray-tile">
-        <div class="slot-label">${esc(s.name)}</div>
-        <div class="square" style="width:44px;height:44px;background:${empty ? "var(--ft-track)" : esc(color)};"></div>
-        <div class="bar" style="width:44px;">${empty ? "" : `<i style="width:${pct != null ? pct : 0}%;background:var(--ft-accent);"></i>`}</div>
-        <div class="mat">${empty ? "Gol" : esc(mat)}</div>
-      </div>`;
+    const discovered = [];
+    const multiUnit = new Set(trays.map((t) => t.unit)).size > 1;
+    trays.forEach((t) => {
+      const label = multiUnit ? `AMS${t.unit}·T${t.tray}` : `T${t.tray}`;
+      discovered.push({ entityId: t.entityId, label });
+      h += this._trayTile(label, this._readRawTray(t.entityId));
     });
-    this.$.loaded.innerHTML = any
-      ? h
-      : `<div class="empty-msg" style="padding:8px;">Fără senzori AMS încă — instalează pachetul de tracker.</div>`;
+    externals.forEach((e, idx) => {
+      const label = externals.length > 1 ? `Extern ${idx + 1}` : "Extern";
+      discovered.push({ entityId: e.entityId, label });
+      h += this._trayTile(label, this._readRawTray(e.entityId));
+    });
+    this.$.loaded.innerHTML = h;
+    this._discoveredSlots = discovered;
   }
 
   _updateMapping() {
-    const entities = [1, 2, 3, 4].map((i) => `input_select.ams_manual_slot_${i}_mapping`);
-    const present = entities.filter((e) => this._hass.states[e]);
-    if (present.length === 0) {
-      this.$.mapping.innerHTML = `<div class="empty-msg" style="padding:8px;">Selectoarele de mapare AMS nu există încă.</div>`;
+    const attrs = this._spoolsAttr();
+    if (!attrs) {
+      this.$.mapping.innerHTML = `<div class="empty-msg" style="padding:8px;">Filament Tracker neconfigurat încă.</div>`;
       return;
     }
-    const sig = present.map((e) => (this._hass.states[e].attributes.options || []).join("|")).join("~");
-    if (sig !== this._lastOptionsSig || this.$.mapping.children.length === 0) {
-      this._lastOptionsSig = sig;
-      this.$.mapping.innerHTML = present
-        .map((e, idx) => {
-          const st = this._hass.states[e];
-          const options = st.attributes.options || [];
-          return `<div class="mapping-item">
-            <label>Slot ${idx + 1}</label>
-            <select data-entity="${e}">
-              ${options.map((o) => `<option value="${esc(o)}"${o === st.state ? " selected" : ""}>${esc(o)}</option>`).join("")}
-            </select>
-          </div>`;
-        })
-        .join("");
-    } else {
-      present.forEach((e) => {
-        const sel = this.$.mapping.querySelector(`select[data-entity="${e}"]`);
-        if (sel && sel.value !== this._hass.states[e].state) sel.value = this._hass.states[e].state;
-      });
-    }
+    const mappings = attrs.mappings || {};
+    const spools = attrs.spools || [];
+    const slots =
+      this._discoveredSlots && this._discoveredSlots.length > 0
+        ? this._discoveredSlots
+        : [1, 2, 3, 4].map((i) => ({ entityId: null, label: `Slot ${i}` }));
+
+    const optionsHtml =
+      `<option value="">— Niciuna / RFID auto —</option>` +
+      spools.map((s) => `<option value="${s.id}">${esc(s.label)}</option>`).join("");
+
+    this.$.mapping.innerHTML = slots
+      .map((slot, idx) => {
+        const slotNum = idx + 1;
+        return `<div class="mapping-item">
+          <label>${esc(slot.label)}</label>
+          <select data-slot="${slotNum}">${optionsHtml}</select>
+        </div>`;
+      })
+      .join("");
+
+    slots.forEach((slot, idx) => {
+      const slotNum = idx + 1;
+      const sel = this.$.mapping.querySelector(`select[data-slot="${slotNum}"]`);
+      const current = mappings[String(slotNum)];
+      if (sel) sel.value = current != null ? String(current) : "";
+    });
   }
 
   _renderShelf() {
@@ -589,6 +635,52 @@ class FilamentTrackerCard extends HTMLElement {
 }
 
 customElements.define("filament-tracker-card", FilamentTrackerCard);
+
+// Visual config editor — shown in the card's "Edit" GUI, no YAML needed to customize.
+class FilamentTrackerCardEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = config || {};
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+  }
+
+  _render() {
+    if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+    const current = this._config.low_stock_threshold != null ? this._config.low_stock_threshold : "";
+    this.shadowRoot.innerHTML = `
+      <style>
+        .row { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; }
+        label { font-size: 13px; font-weight: 500; color: var(--primary-text-color); }
+        input {
+          font: inherit; padding: 8px 10px; border-radius: 8px;
+          border: 1px solid var(--divider-color); background: var(--card-background-color);
+          color: var(--primary-text-color);
+        }
+        .hint { font-size: 11px; color: var(--secondary-text-color); }
+      </style>
+      <div class="row">
+        <label>Prag stoc redus (g) — opțional</label>
+        <input type="number" id="threshold" min="0" value="${esc(current)}" placeholder="folosește pragul din integrare">
+        <div class="hint">Lasă gol ca să folosești pragul din Settings → Devices &amp; Services → Filament Tracker → Configure.</div>
+      </div>
+    `;
+    this.shadowRoot.querySelector("#threshold").addEventListener("change", (e) => {
+      const v = e.target.value;
+      const newConfig = { ...this._config };
+      if (v === "") delete newConfig.low_stock_threshold;
+      else newConfig.low_stock_threshold = parseFloat(v);
+      this._config = newConfig;
+      this.dispatchEvent(
+        new CustomEvent("config-changed", { detail: { config: newConfig }, bubbles: true, composed: true })
+      );
+    });
+  }
+}
+
+customElements.define("filament-tracker-card-editor", FilamentTrackerCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({

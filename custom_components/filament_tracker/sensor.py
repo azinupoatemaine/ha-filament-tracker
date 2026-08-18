@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DEFAULT_LOW_STOCK_THRESHOLD, DOMAIN, SIGNAL_SPOOLS_UPDATED
+from .const import DEFAULT_LOW_STOCK_THRESHOLD, DOMAIN, OPT_LOW_STOCK_THRESHOLD, SIGNAL_SPOOLS_UPDATED
 
 
 async def async_setup_entry(
@@ -17,7 +17,7 @@ async def async_setup_entry(
 
 
 class FilamentSpoolsSensor(SensorEntity):
-    """Aggregate view of every tracked spool."""
+    """Aggregate view of every tracked spool, plus AMS-slot mappings."""
 
     _attr_name = "Filament Spools DB"
     _attr_icon = "mdi:database"
@@ -40,6 +40,7 @@ class FilamentSpoolsSensor(SensorEntity):
     def _refresh(self) -> None:
         data = self.hass.data[DOMAIN][self._entry.entry_id]
         spools: list[dict] = data["spools"]
+        mappings: dict = data.get("mappings", {})
         threshold = self._threshold()
 
         total = 0.0
@@ -58,6 +59,8 @@ class FilamentSpoolsSensor(SensorEntity):
         self._attr_native_value = "ok"
         self._attr_extra_state_attributes = {
             "spools": spools,
+            "mappings": mappings,
+            "threshold": threshold,
             "total_remaining": round(total),
             "low_stock_count": len(low),
             "low_stock_labels": low,
@@ -65,10 +68,4 @@ class FilamentSpoolsSensor(SensorEntity):
         }
 
     def _threshold(self) -> float:
-        threshold_state = self.hass.states.get("input_number.filament_low_stock_threshold")
-        if threshold_state is None:
-            return DEFAULT_LOW_STOCK_THRESHOLD
-        try:
-            return float(threshold_state.state)
-        except (TypeError, ValueError):
-            return DEFAULT_LOW_STOCK_THRESHOLD
+        return float(self._entry.options.get(OPT_LOW_STOCK_THRESHOLD, DEFAULT_LOW_STOCK_THRESHOLD))
