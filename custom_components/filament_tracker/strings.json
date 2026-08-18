@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Filament Tracker",
+        "description": "Track backstock/refill filament spools with add/delete support, stored natively in Home Assistant's own storage."
+      }
+    },
+    "abort": {
+      "already_configured": "Filament Tracker is already set up."
+    }
+  }
+}

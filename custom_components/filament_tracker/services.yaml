@@ -1,0 +1,85 @@
+add_spool:
+  name: Add spool
+  description: Add a new backstock/refill filament spool.
+  fields:
+    label:
+      name: Label
+      example: "Esun PLA+ Cool Grey"
+      selector:
+        text:
+    material:
+      name: Material
+      example: PLA
+      selector:
+        text:
+    color_hex:
+      name: Color (hex)
+      example: "#8C8F91"
+      selector:
+        text:
+    weight_full:
+      name: Full weight (g)
+      example: 1000
+      selector:
+        number:
+          min: 0
+          max: 5000
+          mode: box
+    weight_remaining:
+      name: Remaining weight (g)
+      example: 1000
+      selector:
+        number:
+          min: 0
+          max: 5000
+          mode: box
+    status:
+      name: Status
+      example: Sealed
+      selector:
+        select:
+          options:
+            - Sealed
+            - Opened
+            - Empty
+
+delete_spool:
+  name: Delete spool
+  description: Remove a spool by id.
+  fields:
+    id:
+      name: Spool ID
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 0
+          mode: box
+
+update_spool:
+  name: Update spool
+  description: Update a spool's remaining weight and/or status.
+  fields:
+    id:
+      name: Spool ID
+      required: true
+      example: 3
+      selector:
+        number:
+          min: 0
+          mode: box
+    weight_remaining:
+      name: Remaining weight (g)
+      selector:
+        number:
+          min: 0
+          max: 5000
+          mode: box
+    status:
+      name: Status
+      selector:
+        select:
+          options:
+            - Sealed
+            - Opened
+            - Empty
