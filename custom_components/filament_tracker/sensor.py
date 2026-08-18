@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -33,7 +33,17 @@ class FilamentSpoolsSensor(SensorEntity):
         )
         self._refresh()
 
+    @callback
     def _handle_update(self) -> None:
+        """Run inline on the event loop, not the executor pool.
+
+        Without @callback, HA can't tell this is safe to call directly and
+        schedules it onto the executor thread pool instead — which races
+        against (and can lag well behind, depending on pool load) the write
+        it's supposed to reflect. That's what made the card's post-write
+        state fetch unreliable: it could run before this had actually
+        executed.
+        """
         self._refresh()
         self.async_write_ha_state()
 
