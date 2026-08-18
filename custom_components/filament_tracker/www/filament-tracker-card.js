@@ -462,8 +462,10 @@ class FilamentTrackerCard extends HTMLElement {
   // ---------- per-hass-update rendering ----------
   _updateAll() {
     this._resolvePending();
-    this._updateStats();
+    // _updateLoaded populates _discoveredSlots, which _updateStats needs in
+    // order to total up what's loaded in the AMS — so it has to run first.
     this._updateLoaded();
+    this._updateStats();
     this._updateMapping();
     this._updateLoadedManual();
     this._renderShelf();
@@ -543,16 +545,58 @@ class FilamentTrackerCard extends HTMLElement {
     return attrs && attrs.threshold != null ? attrs.threshold : 100;
   }
 
+  // Nominal spool size to assume for an AMS tray that doesn't report one.
+  // Bambu's RFID tags carry tray_weight, but third-party spools on a reusable
+  // tag usually don't, and 250g/750g spools exist — hence the config option.
+  _amsSpoolSize() {
+    const v =
+      this._config && this._config.ams_spool_size != null
+        ? parseFloat(this._config.ams_spool_size)
+        : NaN;
+    return Number.isFinite(v) && v > 0 ? v : 1000;
+  }
+
+  // Grams currently sitting in the printer, estimated per tray as
+  // (remaining % × spool size). The AMS only reports a percentage, so this is
+  // an estimate by nature — exact only for RFID spools that report tray_weight.
+  _amsLoadedGrams() {
+    const slots = this._discoveredSlots || [];
+    if (slots.length === 0) return 0;
+    const attrs = this._spoolsAttr();
+    const mappings = (attrs && attrs.mappings) || {};
+    let grams = 0;
+    slots.forEach((slot, idx) => {
+      // A slot mapped by hand is already represented by a real spool in the
+      // database, whose exact remaining weight total_remaining counts. Adding
+      // the tray estimate on top of that would double-count it.
+      if (mappings[String(idx + 1)] != null) return;
+      if (!slot.entityId) return;
+      const info = this._readRawTray(slot.entityId);
+      if (info.empty || info.pct == null) return;
+      grams += (info.pct / 100) * (info.weight || this._amsSpoolSize());
+    });
+    return grams;
+  }
+
   _updateStats() {
     const attrs = this._spoolsAttr();
-    const total = attrs ? attrs.total_remaining : null;
+    const stock = attrs && attrs.total_remaining != null ? attrs.total_remaining : null;
+    const ams = Math.round(this._amsLoadedGrams());
+    // "Total" means all the filament you own, wherever it physically is:
+    // the backstock shelf plus whatever is loaded in the printer right now.
+    const total = stock != null ? stock + ams : ams > 0 ? ams : null;
     const low = attrs ? attrs.low_stock_count : null;
     this.$.subtitle.textContent = attrs
       ? `${(attrs.spools || []).length} bobine urmărite`
       : "Filament Tracker neconfigurat încă";
+    const breakdown =
+      ams > 0
+        ? `${(stock || 0).toLocaleString()} g în rezervă + ${ams.toLocaleString()} g în AMS (estimat din procentul rămas)`
+        : "Filament în rezervă";
     this.$.stats.innerHTML = `
-      <div class="stat-pill"><span class="n">${total != null ? total.toLocaleString() : "—"}</span><span class="l">g total</span></div>
-      <div class="stat-pill${low > 0 ? " warn" : ""}"><span class="n">${low != null ? low : "—"}</span><span class="l">stoc redus</span></div>
+      <div class="stat-pill" title="${esc(breakdown)}"><span class="n">${total != null ? total.toLocaleString() : "—"}</span><span class="l">g total</span></div>
+      ${ams > 0 ? `<div class="stat-pill" title="Estimat din procentul rămas raportat de AMS"><span class="n">${ams.toLocaleString()}</span><span class="l">g în AMS</span></div>` : ""}
+      <div class="stat-pill${low > 0 ? " warn" : ""}" title="Bobine din rezervă sub prag — nu include AMS"><span class="n">${low != null ? low : "—"}</span><span class="l">stoc redus</span></div>
     `;
   }
 
@@ -588,7 +632,11 @@ class FilamentTrackerCard extends HTMLElement {
     if (color && !String(color).startsWith("#")) color = "#" + color;
     const remainRaw = attrs.remain;
     const pct = remainRaw != null && parseInt(remainRaw, 10) >= 0 ? parseInt(remainRaw, 10) : null;
-    return { empty, type, color: color || "#888888", pct };
+    // ha-bambulab reports tray_weight (nominal spool grams) off the RFID tag,
+    // and 0 when it doesn't know. Only trust a positive number.
+    const weightRaw = parseFloat(attrs.tray_weight);
+    const weight = Number.isFinite(weightRaw) && weightRaw > 0 ? weightRaw : null;
+    return { empty, type, color: color || "#888888", pct, weight };
   }
 
   _trayTile(label, info) {
@@ -930,6 +978,7 @@ class FilamentTrackerCardEditor extends HTMLElement {
   _render() {
     if (!this.shadowRoot) this.attachShadow({ mode: "open" });
     const current = this._config.low_stock_threshold != null ? this._config.low_stock_threshold : "";
+    const amsSize = this._config.ams_spool_size != null ? this._config.ams_spool_size : "";
     this.shadowRoot.innerHTML = `
       <style>
         .row { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; }
@@ -946,17 +995,33 @@ class FilamentTrackerCardEditor extends HTMLElement {
         <input type="number" id="threshold" min="0" value="${esc(current)}" placeholder="folosește pragul din integrare">
         <div class="hint">Lasă gol ca să folosești pragul din Settings → Devices &amp; Services → Filament Tracker → Configure.</div>
       </div>
+      <div class="row">
+        <label>Greutate bobină AMS (g) — opțional</label>
+        <input type="number" id="ams-size" min="1" value="${esc(amsSize)}" placeholder="1000">
+        <div class="hint">Folosită ca să estimezi câte grame sunt în AMS, pornind de la procentul rămas. Bobinele Bambu cu RFID își raportează singure greutatea; asta se aplică doar celorlalte.</div>
+      </div>
     `;
     this.shadowRoot.querySelector("#threshold").addEventListener("change", (e) => {
       const v = e.target.value;
       const newConfig = { ...this._config };
       if (v === "") delete newConfig.low_stock_threshold;
       else newConfig.low_stock_threshold = parseFloat(v);
-      this._config = newConfig;
-      this.dispatchEvent(
-        new CustomEvent("config-changed", { detail: { config: newConfig }, bubbles: true, composed: true })
-      );
+      this._emit(newConfig);
     });
+    this.shadowRoot.querySelector("#ams-size").addEventListener("change", (e) => {
+      const v = e.target.value;
+      const newConfig = { ...this._config };
+      if (v === "") delete newConfig.ams_spool_size;
+      else newConfig.ams_spool_size = parseFloat(v);
+      this._emit(newConfig);
+    });
+  }
+
+  _emit(newConfig) {
+    this._config = newConfig;
+    this.dispatchEvent(
+      new CustomEvent("config-changed", { detail: { config: newConfig }, bubbles: true, composed: true })
+    );
   }
 }
 
