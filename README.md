@@ -63,7 +63,11 @@ hand-written automation lives inside the integration or the card instead:
 - **Mapping a spool to a slot moves it off the shelf** into a small "Loaded manually"
   strip next to the real AMS trays — the shelf stays "what's in reserve," not "what
   exists." Unmap it (set the dropdown back to "None") and it returns to the shelf.
-- Add-spool form (collapsed behind a button so the default view stays compact)
+- Add-spool form (collapsed behind a button so the default view stays compact),
+  with an optional "Bambu line + color" pair of dropdowns that auto-fills Material
+  and the exact hex — 78 official colors across PLA Basic/Matte, PETG Basic/CF, ABS,
+  and ASA, sourced from Bambu's own hex-code-table PDFs. Skip it and type your own
+  for anything else (refills, third-party, discontinued colors).
 - Click any spool tile — on the shelf or in the loaded strip — to open an inline
   editor: update remaining weight/status, or delete
 - Search box, sort by material/name/amount, click a material chip to filter

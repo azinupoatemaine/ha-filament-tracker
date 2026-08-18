@@ -7,6 +7,49 @@ function esc(str) {
   return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
+// Official Bambu Lab hex codes, pulled from their own filament hex-code-table
+// PDFs (store.bblcdn.com). Not exhaustive forever — Bambu adds colors over
+// time — but covers the common lines. Only used to pre-fill the Material/
+// Culoare fields in the add form; both stay freely editable either way, and
+// this has no effect on non-Bambu spools.
+const BAMBU_COLORS = {
+  "PLA Basic": {
+    "Jade White": "#FFFFFF", "Black": "#000000", "Red": "#C12E1F", "Blue": "#0A2989",
+    "Gray": "#8E9089", "Bambu Green": "#00AE42", "Mistletoe Green": "#3F8E43", "Cyan": "#0086D6",
+    "Sunflower Yellow": "#FEC600", "Indigo Purple": "#482960", "Cocoa Brown": "#6F5034",
+    "Hot Pink": "#F5547C", "Pumpkin Orange": "#FF9016", "Magenta": "#EC008C", "Gold": "#E4BD68",
+    "Purple": "#5E43B7", "Beige": "#F7E6DE", "Pink": "#F55A74", "Bronze": "#847D48",
+    "Turquoise": "#00B1B7", "Light Gray": "#D1D3D5", "Yellow": "#F4EE2A", "Blue Grey": "#5B6579",
+    "Silver": "#A6A9AA", "Orange": "#FF6A13", "Bright Green": "#BECF00", "Brown": "#9D432C",
+    "Dark Gray": "#545454", "Maroon Red": "#9D2235", "Cobalt Blue": "#0056B8",
+  },
+  "PLA Matte": {
+    "Ivory White": "#FFFFFF", "Desert Tan": "#E8DBB7", "Lilac Purple": "#AE96D4",
+    "Mandarin Orange": "#F99963", "Scarlet Red": "#DE4343", "Grass Green": "#61C680",
+    "Marine Blue": "#0078BF", "Lemon Yellow": "#F7D959", "Charcoal": "#000000", "Ash Gray": "#9B9EA0",
+  },
+  "PETG Basic": {
+    "Red": "#D6001C", "Yellow": "#FCE300", "Reflex Blue": "#001489", "Black": "#000000",
+    "Gray": "#7F7E83", "Dark Brown": "#4F2C1D", "White": "#FFFFFF", "Orange": "#FF671F",
+    "Navy Blue": "#0086D6", "Misty Blue": "#688197", "Green": "#009639", "Pine Green": "#034638",
+    "Dark Beige": "#DBC8B6",
+  },
+  "PETG-CF": {
+    "Brick Red": "#9F332A", "Violet Purple": "#583061", "Indigo Blue": "#324585",
+    "Malachite Green": "#16B08E", "Black": "#000000", "Titan Gray": "#565656",
+  },
+  "ABS": {
+    "White": "#FFFFFF", "Bambu Green": "#00AE42", "Olive": "#789D4A", "Azure": "#489FDF",
+    "Navy Blue": "#0C2340", "Blue": "#0A2CA5", "Tangerine Yellow": "#FFC72C", "Orange": "#FF6A13",
+    "Red": "#D32941", "Purple": "#AF1685", "Silver": "#87909A", "Black": "#000000",
+    "Desert Tan": "#E8DBB7",
+  },
+  "ASA": {
+    "White": "#FFFAF2", "Gray": "#8A949E", "Red": "#E02928", "Green": "#00A6A0",
+    "Blue": "#2140B4", "Black": "#000000",
+  },
+};
+
 const CARD_CSS = `
   :host {
     --ft-accent: #1F7A4D;
@@ -215,6 +258,17 @@ class FilamentTrackerCard extends HTMLElement {
         <button class="add-toggle" id="ft-add-toggle"><ha-icon icon="mdi:plus-circle"></ha-icon>Adaugă bobină</button>
         <div class="add-form" id="ft-add-form" hidden style="margin-top:10px;">
           <div class="grid">
+            <div class="field"><label>Culoare Bambu (opțional)</label>
+              <select id="ft-bambu-line">
+                <option value="">— alege linia —</option>
+              </select>
+            </div>
+            <div class="field"><label>&nbsp;</label>
+              <input type="text" id="ft-bambu-color" list="ft-bambu-color-list" placeholder="tastează sau alege..." disabled>
+              <datalist id="ft-bambu-color-list"></datalist>
+            </div>
+          </div>
+          <div class="grid" style="margin-top:8px;">
             <div class="field"><label>Etichetă</label><input type="text" id="ft-in-label" placeholder="Esun PLA+ Cool Grey"></div>
             <div class="field"><label>Material</label><input type="text" id="ft-in-material" placeholder="PLA"></div>
             <div class="field"><label>Culoare (hex)</label><input type="text" id="ft-in-color" placeholder="#1E88E5" value="#888888"></div>
@@ -272,6 +326,9 @@ class FilamentTrackerCard extends HTMLElement {
       mapping: this._card.querySelector("#ft-mapping"),
       addToggle: this._card.querySelector("#ft-add-toggle"),
       addForm: this._card.querySelector("#ft-add-form"),
+      bambuLine: this._card.querySelector("#ft-bambu-line"),
+      bambuColor: this._card.querySelector("#ft-bambu-color"),
+      bambuColorList: this._card.querySelector("#ft-bambu-color-list"),
       inLabel: this._card.querySelector("#ft-in-label"),
       inMaterial: this._card.querySelector("#ft-in-material"),
       inColor: this._card.querySelector("#ft-in-color"),
@@ -300,6 +357,37 @@ class FilamentTrackerCard extends HTMLElement {
     });
     this.$.addCancel.addEventListener("click", () => this.$.addForm.setAttribute("hidden", ""));
     this.$.addSubmit.addEventListener("click", () => this._submitAdd());
+
+    Object.keys(BAMBU_COLORS).forEach((line) => {
+      const opt = document.createElement("option");
+      opt.value = line;
+      opt.textContent = line;
+      this.$.bambuLine.appendChild(opt);
+    });
+    this.$.bambuLine.addEventListener("change", () => {
+      const line = this.$.bambuLine.value;
+      this.$.bambuColor.value = "";
+      this.$.bambuColorList.innerHTML = "";
+      if (!line) {
+        this.$.bambuColor.setAttribute("disabled", "");
+        return;
+      }
+      this.$.bambuColor.removeAttribute("disabled");
+      Object.keys(BAMBU_COLORS[line]).forEach((name) => {
+        const opt = document.createElement("option");
+        opt.value = name;
+        this.$.bambuColorList.appendChild(opt);
+      });
+    });
+    this.$.bambuColor.addEventListener("input", () => {
+      const line = this.$.bambuLine.value;
+      const hex = line && BAMBU_COLORS[line][this.$.bambuColor.value];
+      if (hex) {
+        this.$.inMaterial.value = line;
+        this.$.inColor.value = hex;
+        if (!this.$.inLabel.value) this.$.inLabel.value = `Bambu ${line} — ${this.$.bambuColor.value}`;
+      }
+    });
 
     this.$.editorCancel.addEventListener("click", () => this._closeEditor());
     this.$.editorSave.addEventListener("click", () => this._saveEditor());
@@ -646,6 +734,10 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.inFull.value = "1000";
     this.$.inRemaining.value = "1000";
     this.$.inStatus.value = "Sealed";
+    this.$.bambuLine.value = "";
+    this.$.bambuColor.value = "";
+    this.$.bambuColor.setAttribute("disabled", "");
+    this.$.bambuColorList.innerHTML = "";
     this.$.addForm.setAttribute("hidden", "");
   }
 
