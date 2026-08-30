@@ -7,6 +7,25 @@ function esc(str) {
   return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 }
 
+// The card's own palette tokens — the only non-hex values allowed to land in a
+// style="..." attribute.
+const FT_COLOR_TOKENS = new Set([
+  "var(--ft-accent)", "var(--ft-accent-ink)", "var(--ft-warn)", "var(--ft-warn-ink)",
+  "var(--ft-wood)", "var(--ft-track)", "var(--ft-border)", "var(--ft-ink)",
+  "var(--ft-ink-2)", "var(--ft-ink-3)", "var(--ft-surface)",
+]);
+
+// Colours reach us from RFID tags, the spool store and hand-typed hex fields,
+// and every one gets interpolated straight into an inline style — a spot where
+// esc() alone still waves through a value like "red;position:fixed;inset:0".
+// Allow only a bare hex literal or one of our theme tokens; anything else
+// collapses to a neutral grey.
+function cssColor(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (/^#[0-9a-fA-F]{3,8}$/.test(s) || FT_COLOR_TOKENS.has(s)) return s;
+  return "#888888";
+}
+
 // ---------------------------------------------------------------------------
 // Translations. English is the fallback for any key a language is missing, so
 // an incomplete translation degrades one string at a time instead of breaking
@@ -54,6 +73,12 @@ const I18N = {
     delete: "Delete",
     confirm_delete: "Delete this spool?",
     confirm_discard_pending: "This spool hasn't been confirmed yet. Discard it?",
+    confirm_ok: "OK",
+    a11y_edit_spool: "Edit {label}",
+    a11y_delete_spool: "Delete {label}",
+    a11y_discard_pending: "Discard unconfirmed spool {label}",
+    a11y_group_toggle: "{material} — show or hide this group",
+    a11y_filter_material: "Filter by {material}",
     unconfirmed_suffix: " (unconfirmed)",
     saving_suffix: "saving…",
     search_ph: "Search by name or color…",
@@ -126,6 +151,12 @@ const I18N = {
     delete: "Șterge",
     confirm_delete: "Ștergi această bobină?",
     confirm_discard_pending: "Nu s-a confirmat încă adăugarea. Renunți la această bobină?",
+    confirm_ok: "OK",
+    a11y_edit_spool: "Editează {label}",
+    a11y_delete_spool: "Șterge {label}",
+    a11y_discard_pending: "Renunță la bobina neconfirmată {label}",
+    a11y_group_toggle: "{material} — arată sau ascunde grupul",
+    a11y_filter_material: "Filtrează după {material}",
     unconfirmed_suffix: " (neconfirmat)",
     saving_suffix: "se salvează…",
     search_ph: "Caută după nume sau culoare…",
@@ -379,6 +410,10 @@ const CARD_CSS = `
     position: absolute; top: -6px; right: 4px; width: 16px; height: 16px; border-radius: 50%;
     background: var(--ft-surface); border: 1px solid var(--ft-border); display: flex; align-items: center;
     justify-content: center; font-size: 9px; color: var(--ft-ink-2); z-index: 2;
+    /* It's a real <button> now — keyboard and assistive tech get it for free —
+       so strip the UA chrome but keep the pill look set above. */
+    padding: 0; margin: 0; font-family: inherit; line-height: 1; cursor: pointer;
+    -webkit-appearance: none; appearance: none;
   }
   .spool-slot .cap { font-size: 10.5px; color: var(--ft-ink-2); text-align: center; line-height: 1.2; max-width: 68px; height: 2.4em; overflow: hidden; }
   .spool-slot.pending { opacity: .55; cursor: pointer; animation: ft-pending-pulse 1.1s ease-in-out infinite; }
@@ -396,6 +431,31 @@ const CARD_CSS = `
   .editor-panel .field label { font-size: 10px; color: var(--ft-ink-3); text-transform: uppercase; }
   .editor-panel .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+  /* In-card confirm. Native confirm() is blocked outright while a dashboard is
+     being cast, and everywhere else it's an unstyled OS box dropped over a
+     themed card — so the card draws its own and resolves it from JS. */
+  .confirm-overlay {
+    position: fixed; inset: 0; z-index: 999;
+    display: flex; align-items: center; justify-content: center;
+    padding: 16px; background: rgba(0, 0, 0, 0.42);
+  }
+  .confirm-box {
+    width: 100%; max-width: 320px;
+    display: flex; flex-direction: column; gap: 14px;
+    padding: 16px; border-radius: var(--ft-radius);
+    background: var(--ft-surface); color: var(--ft-ink);
+    border: 1px solid var(--ft-border); box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
+  }
+  .confirm-msg { font-size: 13.5px; line-height: 1.45; }
+  .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* Keyboard focus has to stay visible on the elements we turned into
+     role="button" shims, and on the delete button. */
+  .spool-slot:focus-visible, .material-header:focus-visible, .chip:focus-visible,
+  .tray-tile:focus-visible, .spool-slot .del:focus-visible, .confirm-box .btn:focus-visible {
+    outline: 2px solid var(--ft-accent); outline-offset: 2px;
+  }
+
   [hidden] { display: none !important; }
 `;
 
@@ -411,6 +471,9 @@ class FilamentTrackerCard extends HTMLElement {
     this._pendingSpool = null;
     this._pendingBaseline = 0;
     this._pendingTimer = null;
+    this._renderSig = null;
+    this._amsScanAt = -1;
+    this._amsIds = [];
   }
 
   _t(key, vars) {
@@ -428,6 +491,36 @@ class FilamentTrackerCard extends HTMLElement {
   }
 
   setConfig(config) {
+    // Home Assistant turns anything thrown here into an error card, so reject a
+    // malformed config outright rather than limping on with a bad value. An
+    // absent or empty config ({}) is fine — every option has a default.
+    if (config === null || typeof config !== "object" || Array.isArray(config)) {
+      throw new Error("Filament Tracker card: configuration must be an object.");
+    }
+    const finiteNum = (v) => typeof v === "number" && Number.isFinite(v);
+    if (
+      config.low_stock_threshold != null &&
+      !(finiteNum(config.low_stock_threshold) && config.low_stock_threshold >= 0)
+    ) {
+      throw new Error("Filament Tracker card: low_stock_threshold must be a number that is 0 or more.");
+    }
+    if (
+      config.ams_spool_size != null &&
+      !(finiteNum(config.ams_spool_size) && config.ams_spool_size > 0)
+    ) {
+      throw new Error("Filament Tracker card: ams_spool_size must be a number greater than 0.");
+    }
+    if (config.language != null && config.language !== "auto" && !I18N[config.language]) {
+      throw new Error(
+        'Filament Tracker card: language must be "auto" or one of: ' + Object.keys(I18N).join(", ") + "."
+      );
+    }
+    for (const key of Object.keys(config)) {
+      if (key.indexOf("show_") === 0 && typeof config[key] !== "boolean") {
+        throw new Error("Filament Tracker card: " + key + " must be true or false.");
+      }
+    }
+
     this._config = config || {};
     // Lovelace calls this again on every keystroke in the edit dialog's
     // preview, so the visible sections have to follow immediately — not wait
@@ -474,12 +567,58 @@ class FilamentTrackerCard extends HTMLElement {
     this._hass = hass;
     // With language: auto, the first hass is also what tells us which language
     // to use — so a skeleton built before it may need rebuilding once.
-    if (!this._built || this._lang() !== this._builtLang) this._buildSkeleton();
+    if (!this._built || this._lang() !== this._builtLang) {
+      this._buildSkeleton();
+      this._renderSig = null;
+    }
+    // `hass` is set on every state change anywhere in Home Assistant; almost
+    // none concern this card. Re-render only when something it actually reads
+    // has moved — the spools sensor or a discovered AMS entity. setConfig (the
+    // editor's live preview) runs its own full pass and is unaffected.
+    const sig = this._renderSignature(hass);
+    if (sig === this._renderSig) return;
+    this._renderSig = sig;
     this._updateAll();
+  }
+
+  // Cheap fingerprint of everything _updateAll() looks at. sensor.filament_spools_db
+  // advances last_updated on every attribute write (it publishes snapshots), and
+  // the "Loaded now" strip reads the AMS tray / external-spool entities directly.
+  // current_stage / print_weight drive the integration's auto-deduct, not the
+  // card, so they're deliberately out.
+  _renderSignature(hass) {
+    const states = hass && hass.states;
+    if (!states) return "no-hass";
+    const db = states["sensor.filament_spools_db"];
+    const parts = [db ? db.last_updated : "none"];
+    for (const id of this._amsEntityIds(hass)) {
+      const st = states[id];
+      if (st) parts.push(id, st.state, st.last_updated);
+    }
+    return parts.join("|");
+  }
+
+  // The AMS entity set only changes when entities appear or disappear, so only
+  // rescan the (large) state map when its total entry count changes.
+  _amsEntityIds(hass) {
+    const ids = Object.keys(hass.states);
+    if (ids.length !== this._amsScanAt) {
+      this._amsScanAt = ids.length;
+      this._amsIds = ids.filter(
+        (id) => /_ams_\d+_tray_\d+$/.test(id) || id.endsWith("_external_spool")
+      );
+    }
+    return this._amsIds;
   }
 
   getCardSize() {
     return 8;
+  }
+
+  // Sections (grid) dashboards: a wide, tall card — take the full 12 columns
+  // and let the height follow the content.
+  getGridOptions() {
+    return { columns: 12, rows: "auto", min_columns: 6 };
   }
 
   static getStubConfig() {
@@ -585,6 +724,16 @@ class FilamentTrackerCard extends HTMLElement {
         </div>
         <div id="ft-shelf" style="display:flex;flex-direction:column;gap:12px;margin-top:12px;"></div>
       </div>
+
+      <div class="confirm-overlay" id="ft-confirm" hidden>
+        <div class="confirm-box" role="alertdialog" aria-modal="true" aria-labelledby="ft-confirm-msg">
+          <div class="confirm-msg" id="ft-confirm-msg"></div>
+          <div class="confirm-actions">
+            <button class="btn ghost" type="button" id="ft-confirm-cancel">${t("cancel")}</button>
+            <button class="btn primary" type="button" id="ft-confirm-ok">${t("confirm_ok")}</button>
+          </div>
+        </div>
+      </div>
     `;
 
     // Elements that persist and must never be innerHTML-replaced.
@@ -625,6 +774,10 @@ class FilamentTrackerCard extends HTMLElement {
       sort: this._card.querySelector("#ft-sort"),
       chips: this._card.querySelector("#ft-chips"),
       shelf: this._card.querySelector("#ft-shelf"),
+      confirm: this._card.querySelector("#ft-confirm"),
+      confirmMsg: this._card.querySelector("#ft-confirm-msg"),
+      confirmCancel: this._card.querySelector("#ft-confirm-cancel"),
+      confirmOk: this._card.querySelector("#ft-confirm-ok"),
     };
 
     this.$.search.value = prevSearch;
@@ -673,10 +826,12 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.editorSave.addEventListener("click", () => this._saveEditor());
     this.$.editorDelete.addEventListener("click", () => this._deleteFromEditor());
 
-    this.$.loadedManual.addEventListener("click", (e) => {
+    const onLoadedManual = (e) => {
       const tile = e.target.closest(".tray-tile");
-      if (tile && tile.dataset.id) this._openEditor(parseInt(tile.dataset.id, 10));
-    });
+      if (tile && tile.dataset.id) this._openEditor(Number(tile.dataset.id));
+    };
+    this.$.loadedManual.addEventListener("click", onLoadedManual);
+    this.$.loadedManual.addEventListener("keydown", (e) => this._onDelegatedKey(e, onLoadedManual));
 
     this.$.search.addEventListener("input", () => this._renderShelf());
     this.$.sort.addEventListener("change", () => {
@@ -692,18 +847,21 @@ class FilamentTrackerCard extends HTMLElement {
       if (sel.value !== "") data.spool_id = parseInt(sel.value, 10);
       this._callService("set_slot_mapping", data);
     });
-    this.$.chips.addEventListener("click", (e) => {
+    const onChips = (e) => {
       const chip = e.target.closest(".chip");
       if (!chip) return;
       this._activeMaterial = chip.dataset.material === this._activeMaterial ? null : chip.dataset.material;
       this._renderShelf();
-    });
-    this.$.shelf.addEventListener("click", (e) => {
+    };
+    this.$.chips.addEventListener("click", onChips);
+    this.$.chips.addEventListener("keydown", (e) => this._onDelegatedKey(e, onChips));
+
+    const onShelf = async (e) => {
       const del = e.target.closest(".del");
       if (del) {
         e.stopPropagation();
-        if (confirm(this._t("confirm_delete"))) {
-          this._callService("delete_spool", { id: parseInt(del.dataset.id, 10) });
+        if (await this._confirm(this._t("confirm_delete"))) {
+          this._callService("delete_spool", { id: Number(del.dataset.id) });
         }
         return;
       }
@@ -714,6 +872,8 @@ class FilamentTrackerCard extends HTMLElement {
         if (this._collapsed.has(mat)) this._collapsed.delete(mat);
         else this._collapsed.add(mat);
         group.classList.toggle("collapsed");
+        // Keep the announced state in step with the visual one.
+        header.setAttribute("aria-expanded", String(!group.classList.contains("collapsed")));
         return;
       }
       const tile = e.target.closest(".spool-slot");
@@ -723,13 +883,77 @@ class FilamentTrackerCard extends HTMLElement {
         // give it a way out instead of pulsing forever. Dismissing it only
         // clears the local placeholder; if the write did land server-side
         // after all, it'll show up normally on the next state push.
-        if (confirm(this._t("confirm_discard_pending"))) {
+        if (await this._confirm(this._t("confirm_discard_pending"))) {
           this._clearPending();
           this._renderShelf();
         }
         return;
       }
-      this._openEditor(parseInt(tile.dataset.id, 10));
+      this._openEditor(Number(tile.dataset.id));
+    };
+    this.$.shelf.addEventListener("click", onShelf);
+    this.$.shelf.addEventListener("keydown", (e) => this._onDelegatedKey(e, onShelf));
+  }
+
+  // Enter / Space on one of the role="button" shims (a .spool-slot, a
+  // .material-header, a .chip, a manual .tray-tile) should do exactly what a
+  // click does. Real controls in the same containers — the .del button, the
+  // mapping <select> — are left to their own native key handling, which is why
+  // this only fires for elements we explicitly gave role="button".
+  _onDelegatedKey(e, handler) {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const el = e.target;
+    if (!el || typeof el.getAttribute !== "function" || el.getAttribute("role") !== "button") return;
+    // Space would scroll the page; Enter wouldn't, but neither should here.
+    if (e.key !== "Enter") e.preventDefault();
+    handler(e);
+  }
+
+  // Promise-based stand-in for window.confirm(). The native dialog is blocked
+  // outright while a dashboard is being cast, and everywhere else it's an
+  // unstyled OS box dropped on top of a themed card. Resolves true on OK,
+  // false on Cancel, Esc, or a click on the backdrop.
+  _confirm(message) {
+    const panel = this.$.confirm;
+    this.$.confirmMsg.textContent = message;
+    panel.removeAttribute("hidden");
+    // Pull focus off whatever triggered the delete and onto OK, so the keyboard
+    // shortcuts below have somewhere to land — then hand it back on the way out
+    // if that trigger is still around (a cancelled delete, mainly).
+    const returnFocus = this.shadowRoot.activeElement;
+    this.$.confirmOk.focus();
+    return new Promise((resolve) => {
+      const finish = (result) => {
+        panel.setAttribute("hidden", "");
+        this.$.confirmOk.removeEventListener("click", onOk);
+        this.$.confirmCancel.removeEventListener("click", onCancel);
+        panel.removeEventListener("keydown", onKey);
+        panel.removeEventListener("mousedown", onBackdrop);
+        if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === "function") {
+          returnFocus.focus();
+        }
+        resolve(result);
+      };
+      const onOk = () => finish(true);
+      const onCancel = () => finish(false);
+      const onKey = (ev) => {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          finish(false);
+        } else if (ev.key === "Enter") {
+          ev.preventDefault();
+          finish(true);
+        }
+      };
+      // mousedown, not click, so a drag that starts inside the box and ends on
+      // the backdrop doesn't count as a dismiss.
+      const onBackdrop = (ev) => {
+        if (ev.target === panel) finish(false);
+      };
+      this.$.confirmOk.addEventListener("click", onOk);
+      this.$.confirmCancel.addEventListener("click", onCancel);
+      panel.addEventListener("keydown", onKey);
+      panel.addEventListener("mousedown", onBackdrop);
     });
   }
 
@@ -923,8 +1147,8 @@ class FilamentTrackerCard extends HTMLElement {
   _trayTile(label, info) {
     return `<div class="tray-tile">
       <div class="slot-label">${esc(label)}</div>
-      <div class="square" style="width:44px;height:44px;background:${info.empty ? "var(--ft-track)" : esc(info.color)};"></div>
-      <div class="bar" style="width:44px;">${info.empty ? "" : `<i style="width:${info.pct != null ? info.pct : 0}%;background:var(--ft-accent);"></i>`}</div>
+      <div class="square" style="width:44px;height:44px;background:${info.empty ? "var(--ft-track)" : cssColor(info.color)};"></div>
+      <div class="bar" style="width:44px;">${info.empty ? "" : `<i style="width:${info.pct != null ? Number(info.pct) : 0}%;background:var(--ft-accent);"></i>`}</div>
       <div class="mat">${info.empty ? esc(this._t("tray_empty")) : esc(info.type)}</div>
     </div>`;
   }
@@ -968,7 +1192,7 @@ class FilamentTrackerCard extends HTMLElement {
 
     const optionsHtml =
       `<option value="">${esc(this._t("map_none"))}</option>` +
-      spools.map((s) => `<option value="${s.id}">${esc(s.label)}</option>`).join("");
+      spools.map((s) => `<option value="${Number(s.id)}">${esc(s.label)}</option>`).join("");
 
     this.$.mapping.innerHTML = slots
       .map((slot, idx) => {
@@ -1016,10 +1240,10 @@ class FilamentTrackerCard extends HTMLElement {
       const rem = parseFloat(spool.weight_remaining) || 0;
       const full = parseFloat(spool.weight_full) || 0;
       const pct = full > 0 ? Math.round((rem / full) * 100) : 0;
-      h += `<div class="tray-tile" data-id="${spool.id}" style="cursor:pointer;" title="${esc(this._t("manual_tile_tip"))}">
+      h += `<div class="tray-tile" data-id="${Number(spool.id)}" role="button" tabindex="0" aria-label="${esc(this._t("a11y_edit_spool", { label: spool.label }))}" style="cursor:pointer;" title="${esc(this._t("manual_tile_tip"))}">
         <div class="slot-label">${esc(slotLabel)}</div>
-        <div class="square" style="width:44px;height:44px;background:${esc(spool.color_hex || "#888888")};"></div>
-        <div class="bar" style="width:44px;"><i style="width:${pct}%;background:var(--ft-accent);"></i></div>
+        <div class="square" style="width:44px;height:44px;background:${cssColor(spool.color_hex)};"></div>
+        <div class="bar" style="width:44px;"><i style="width:${Number(pct) || 0}%;background:var(--ft-accent);"></i></div>
         <div class="mat">${esc(spool.label)}</div>
       </div>`;
     });
@@ -1073,7 +1297,7 @@ class FilamentTrackerCard extends HTMLElement {
     this.$.chips.innerHTML = allMaterials
       .map(
         (m) =>
-          `<div class="chip${m === this._activeMaterial ? " active" : ""}" data-material="${esc(m)}">${esc(m)}</div>`
+          `<div class="chip${m === this._activeMaterial ? " active" : ""}" role="button" tabindex="0" aria-pressed="${m === this._activeMaterial ? "true" : "false"}" aria-label="${esc(this._t("a11y_filter_material", { material: m }))}" data-material="${esc(m)}">${esc(m)}</div>`
       )
       .join("");
 
@@ -1097,7 +1321,7 @@ class FilamentTrackerCard extends HTMLElement {
       const matTotal = list.filter((s) => s.status !== "Empty").reduce((a, s) => a + (parseFloat(s.weight_remaining) || 0), 0);
       const collapsedClass = this._collapsed.has(material) ? " collapsed" : "";
       h += `<div class="material-group${collapsedClass}" data-material="${esc(material)}">
-        <div class="material-header">
+        <div class="material-header" role="button" tabindex="0" aria-expanded="${this._collapsed.has(material) ? "false" : "true"}" aria-label="${esc(this._t("a11y_group_toggle", { material }))}">
           <span class="name"><ha-icon icon="mdi:chevron-down"></ha-icon>${esc(material)}</span>
           <span class="meta">${esc(this._t("group_meta", { n: list.length, g: Math.round(matTotal) }))}</span>
         </div>`;
@@ -1117,14 +1341,20 @@ class FilamentTrackerCard extends HTMLElement {
     const pct = full > 0 ? Math.round((rem / full) * 100) : 0;
     const isEmpty = s.status === "Empty";
     const low = !isEmpty && rem <= threshold;
-    const bg = isEmpty ? "var(--ft-track)" : esc(s.color_hex || "#888888");
+    const bg = isEmpty ? "var(--ft-track)" : cssColor(s.color_hex);
     const barColor = low ? "var(--ft-warn)" : "var(--ft-accent)";
     const pendingClass = s._pending ? " pending" : "";
+    const id = Number(s.id);
     const title = s._pending
       ? `${esc(s.label)} — ${esc(this._t("saving_suffix"))}`
       : `${esc(s.label)} — ${esc(this._statusLabel(s.status))} — ${rem}g / ${full}g (${pct}%)`;
-    return `<div class="spool-slot${pendingClass}" data-id="${s.id}" title="${title}">
-      <div class="del" data-id="${s.id}">✕</div>
+    // The slot is a role="button" shim (opens the editor, or discards a pending
+    // placeholder); the ✕ is a real <button> so keyboard and AT users get it.
+    const slotLabel = s._pending
+      ? this._t("a11y_discard_pending", { label: s.label })
+      : this._t("a11y_edit_spool", { label: s.label });
+    return `<div class="spool-slot${pendingClass}" data-id="${id}" role="button" tabindex="0" aria-label="${esc(slotLabel)}" title="${title}">
+      <button type="button" class="del" data-id="${id}" aria-label="${esc(this._t("a11y_delete_spool", { label: s.label }))}">✕</button>
       <div class="square" style="width:52px;height:52px;background:${bg};"></div>
       <div class="bar" style="width:52px;"><i style="width:${isEmpty ? 0 : pct}%;background:${barColor};"></i></div>
       <div class="cap">${esc(s.label)}</div>
@@ -1233,10 +1463,11 @@ class FilamentTrackerCard extends HTMLElement {
     this._closeEditor();
   }
 
-  _deleteFromEditor() {
+  async _deleteFromEditor() {
     if (this._editingId == null) return;
-    if (confirm(this._t("confirm_delete"))) {
-      this._callService("delete_spool", { id: this._editingId });
+    const id = this._editingId;
+    if (await this._confirm(this._t("confirm_delete"))) {
+      this._callService("delete_spool", { id });
     }
     this._closeEditor();
   }
@@ -1389,5 +1620,7 @@ if (!window.customCards.some((c) => c && c.type === "filament-tracker-card")) {
     type: "filament-tracker-card",
     name: "Filament Tracker",
     description: "Live AMS trays, manual mapping, and a searchable/sortable spool shelf with add/delete — all in one card.",
+    documentationURL: "https://github.com/azinupoatemaine/ha-filament-tracker",
+    preview: true,
   });
 }
