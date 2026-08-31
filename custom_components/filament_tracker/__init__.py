@@ -11,7 +11,8 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.dispatcher import async_dispatcher_send
@@ -26,6 +27,7 @@ from homeassistant.helpers.typing import ConfigType
 from .const import (
     AMS_TRAY_RE,
     CARD_FILENAME,
+    CARD_NOTIFICATION_ID,
     CARD_URL_PATH,
     CARD_VERSION,
     CURRENT_STAGE_SUFFIX,
@@ -119,20 +121,27 @@ class FilamentTrackerCardView(HomeAssistantView):
     Serving the file from our own view with a hardcoded Content-Type removes
     that failure mode entirely, regardless of the host OS mimetypes config.
 
-    Caching: the file is served ``immutable`` with a one-year max-age. This is
-    not a workaround, it is how every reliably-loading card is served. The
-    frontend fires the module's ``import()`` un-awaited and only shows a card
-    for ``customElements.whenDefined`` up to a 2000 ms ``TIMEOUT``; miss that
-    window and the dashboard paints the red "Configuration error" placeholder,
-    which then only recovers on its own if the ``ll-rebuild`` retry reaches the
-    card (it does not, inside some stack/grid cards). Other plugins clear the
-    2 s bar because the browser has them cached and the ``import()`` resolves in
-    milliseconds. The previous ``max-age=0, must-revalidate`` here forced a
-    conditional request to HA on *every* dashboard open — the one card on the
-    system paying a network round-trip before it could execute, and the one that
-    lost the race on a cold cache or a hard refresh. The ``?v=CARD_VERSION``
-    query string is the cache-buster: a bump is a URL the browser has never
-    seen, so an update still lands immediately.
+    Caching: one hour, ``public``, and deliberately *not* ``immutable``.
+
+    Some cache lifetime is genuinely needed. The frontend fires the module's
+    ``import()`` un-awaited and only waits on ``customElements.whenDefined`` for
+    a 2000 ms ``TIMEOUT``; miss that window and the dashboard paints the red
+    "Configuration error" placeholder, which then only recovers on its own if
+    the ``ll-rebuild`` retry reaches the card (it does not, inside some
+    stack/grid cards). The original ``max-age=0, must-revalidate`` forced a
+    conditional request to HA on *every* dashboard open — this was the one card
+    on the system paying a network round-trip before it could execute, and the
+    one that lost the race on a cold cache or a hard refresh. A one-hour-fresh
+    response needs no revalidation at all, so that round-trip is gone.
+
+    What is *not* worth having is ``immutable, max-age=31536000``. It pins
+    whatever the browser cached at a given URL for a year with no revalidation —
+    so one bad or truncated fetch, or a stale dashboard resource still pointing
+    at an old ``?v=``, becomes a year-long failure that no restart and no HA-side
+    fix can clear, only the user manually purging browser data. One hour keeps
+    the performance win and caps the blast radius of any mistake at an hour.
+    The ``?v=CARD_VERSION`` query string remains the real cache-buster: a bump
+    is a URL the browser has never seen, so an update still lands immediately.
     """
 
     requires_auth = False
@@ -149,7 +158,7 @@ class FilamentTrackerCardView(HomeAssistantView):
             self._js_path,
             headers={
                 "Content-Type": "text/javascript; charset=utf-8",
-                "Cache-Control": "public, max-age=31536000, immutable",
+                "Cache-Control": "public, max-age=3600",
             },
         )
 
@@ -165,97 +174,357 @@ def _lovelace_attr(lovelace: object, *names: str):
     return None
 
 
-async def _async_register_lovelace_resource(hass: HomeAssistant, module_url: str) -> None:
-    """Also register the card as a real dashboard resource, in storage mode.
+# Outcomes of one pass at reconciling the Lovelace resource list.
+_RESOURCE_OK = "ok"  # the list now holds exactly our current URL
+_RESOURCE_PENDING = "pending"  # Lovelace isn't loaded yet — worth retrying
+_RESOURCE_YAML = "yaml"  # YAML-mode dashboards: only the user can do this
+
+
+async def _async_reconcile_lovelace_resource(hass: HomeAssistant, module_url: str) -> str:
+    """Make the dashboard resource list hold *exactly one* entry for our card.
 
     ``add_extra_js_url`` on its own has proven unreliable for cards bundled
     inside an integration, while cards loaded as ordinary Lovelace resources
     keep working. Registering both costs nothing: the browser's module map
     dedupes the identical URL, so the file is still only evaluated once.
+
+    This reconciles rather than merely "adds if missing", because duplicates are
+    the failure we have actually been chasing. Every restart that bumped
+    ``CARD_VERSION`` could leave another ``?v=`` entry behind, and the frontend
+    loads *all* of them: the browser then fetches several URLs for one card, and
+    if any one of them is a stale entry the user's browser has a bad response
+    cached for, the card can end up never defining its element — with nothing in
+    the console, because a failed module import inside the resource loader is
+    swallowed. So: find every entry whose path (query string ignored) is ours,
+    delete all but one, and point the survivor at the current versioned URL.
+
+    Runs on every start, never skipped by an "already registered" flag, because
+    a duplicate can be introduced by anything — a restore, a manual edit, an
+    older version of this integration.
+
+    Returns one of ``_RESOURCE_OK`` / ``_RESOURCE_PENDING`` / ``_RESOURCE_YAML``.
     """
     lovelace = hass.data.get("lovelace")
     if lovelace is None:
-        _LOGGER.debug("Filament Tracker: Lovelace not set up, skipping resource registration")
-        return
+        _LOGGER.debug("Filament Tracker: Lovelace not set up yet, will retry the resource")
+        return _RESOURCE_PENDING
 
     resources = _lovelace_attr(lovelace, "resources")
     mode = _lovelace_attr(lovelace, "resource_mode", "mode")
     if resources is None:
-        return
-    if mode != "storage":
-        _LOGGER.debug(
-            "Filament Tracker: Lovelace resources are in YAML mode — add the card "
-            "yourself with: resources: [{url: %s, type: module}]",
+        return _RESOURCE_PENDING
+
+    # Deliberately *not* keyed off Lovelace's `mode`. Home Assistant picks the
+    # resource collection from whether `lovelace: resources:` exists in
+    # configuration.yaml, independently of whether dashboards are in YAML mode —
+    # so `mode == "yaml"` with no `resources:` key still gives a perfectly
+    # writable storage collection. Asking the object what it can do is both more
+    # accurate and version-proof: only ResourceYAMLCollection lacks the CRUD
+    # methods, and that is exactly the case where the user must do this by hand.
+    if not all(
+        callable(getattr(resources, attr, None))
+        for attr in ("async_create_item", "async_update_item", "async_delete_item")
+    ):
+        _LOGGER.warning(
+            "Filament Tracker: Lovelace resources are defined in YAML (mode=%s), so "
+            "they can't be edited from here — add the card yourself with: "
+            "resources: [{url: %s, type: module}]",
+            mode,
             module_url,
         )
-        return
+        return _RESOURCE_YAML
 
     # async_items() doesn't lazy-load the collection; async_get_info() does.
     if hasattr(resources, "async_get_info"):
         await resources.async_get_info()
 
     base_url = f"{CARD_URL_PATH}/{CARD_FILENAME}"
-    existing = next(
-        (
-            item
-            for item in (resources.async_items() or [])
-            if str(item.get("url", "")).split("?")[0] == base_url
-        ),
-        None,
-    )
+    items = list(resources.async_items() or [])
+    ours = [item for item in items if str(item.get("url", "")).split("?")[0] == base_url]
 
-    if existing is None:
+    # A copy of the card served from somewhere else (/local/, /hacsfiles/, ...)
+    # is left alone — it may be deliberate — but it is worth naming in the log,
+    # because whichever copy loads first is the one that wins.
+    for item in items:
+        url = str(item.get("url", ""))
+        if url.split("?")[0].endswith(f"/{CARD_FILENAME}") and item not in ours:
+            _LOGGER.warning(
+                "Filament Tracker: another copy of the card is registered at %s. "
+                "Remove it (Settings > Dashboards > Resources) unless you added it "
+                "on purpose — two copies can shadow each other.",
+                url,
+            )
+
+    # Only an entry we can actually address by id is a candidate to keep; one
+    # without an id can be neither updated nor deleted, so ignore it and create.
+    keeper = next((item for item in ours if item.get("id")), None)
+
+    removed = 0
+    for item in ours:
+        item_id = item.get("id")
+        if not item_id or item is keeper:
+            continue
+        await resources.async_delete_item(item_id)
+        removed += 1
+    if removed:
+        _LOGGER.warning(
+            "Filament Tracker: removed %s stale duplicate dashboard resource(s) for the "
+            "card; keeping a single entry at %s",
+            removed,
+            module_url,
+        )
+
+    if keeper is None:
         await resources.async_create_item({"res_type": "module", "url": module_url})
         _LOGGER.info("Filament Tracker: added dashboard resource %s", module_url)
-    elif existing.get("url") != module_url:
+    elif keeper.get("url") != module_url or keeper.get("res_type") != "module":
+        # Read the old URL first: async_update_item edits the item in place.
+        was = keeper.get("url")
         await resources.async_update_item(
-            existing["id"], {"res_type": "module", "url": module_url}
+            keeper["id"], {"res_type": "module", "url": module_url}
         )
-        _LOGGER.info("Filament Tracker: updated dashboard resource to %s", module_url)
+        _LOGGER.info(
+            "Filament Tracker: repointed dashboard resource %s -> %s", was, module_url
+        )
+    else:
+        _LOGGER.debug("Filament Tracker: dashboard resource already correct (%s)", module_url)
+
+    return _RESOURCE_OK
+
+
+@callback
+def _async_notify(hass: HomeAssistant, message: str) -> None:
+    """Raise (or replace) the one "you need to do this by hand" notification."""
+    try:
+        from homeassistant.components import persistent_notification
+
+        persistent_notification.async_create(
+            hass,
+            message,
+            title="Filament Tracker: the card needs one manual step",
+            notification_id=CARD_NOTIFICATION_ID,
+        )
+    except Exception:  # noqa: BLE001 - a failed notification must not fail setup
+        _LOGGER.exception("Filament Tracker: could not raise the setup notification")
+
+
+@callback
+def _async_dismiss_notify(hass: HomeAssistant) -> None:
+    """Take the manual-step notification down once we've managed it ourselves."""
+    try:
+        from homeassistant.components import persistent_notification
+
+        persistent_notification.async_dismiss(hass, CARD_NOTIFICATION_ID)
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug(
+            "Filament Tracker: could not dismiss the setup notification", exc_info=True
+        )
+
+
+def _manual_resource_message(module_url: str, reason: str) -> str:
+    """The exact click-path and URL for adding the card resource by hand."""
+    return (
+        "Filament Tracker could not register its dashboard card automatically, so "
+        'the card shows "Custom element doesn\'t exist: filament-tracker-card" on '
+        "your dashboard.\n\n"
+        "Add it by hand — it is a one-time, 30-second job:\n\n"
+        "1. Go to **Settings → Dashboards**, open the **⋮** menu at the top right, "
+        "and choose **Resources**.\n"
+        "2. Click **+ Add Resource** (bottom right).\n"
+        f"3. URL: `{module_url}`\n"
+        "4. Resource type: **JavaScript module**\n"
+        "5. Click **Create**, then reload the page with **Ctrl+Shift+R** "
+        "(**Cmd+Shift+R** on a Mac).\n\n"
+        f"Reason it could not be done for you: {reason}\n\n"
+        "This notification disappears on its own once Filament Tracker manages to "
+        "register the resource itself."
+    )
+
+
+def _yaml_resource_message(module_url: str) -> str:
+    """YAML-mode dashboards have no Resources UI — give them the YAML instead."""
+    return (
+        "Your Lovelace dashboards are in YAML mode, so Filament Tracker is not "
+        "allowed to add its card resource for you and the card will show "
+        '"Custom element doesn\'t exist: filament-tracker-card".\n\n'
+        "Add it once to `configuration.yaml`:\n\n"
+        "```yaml\n"
+        "lovelace:\n"
+        "  mode: yaml\n"
+        "  resources:\n"
+        f"    - url: {module_url}\n"
+        "      type: module\n"
+        "```\n\n"
+        "If you already have a `lovelace:` block, just add the `resources:` entry "
+        "to it. Then restart Home Assistant and reload the page with "
+        "**Ctrl+Shift+R** (**Cmd+Shift+R** on a Mac)."
+    )
+
+
+def _missing_file_message(js_path: pathlib.Path) -> str:
+    """A different problem entirely, and the Resources screen cannot fix it."""
+    return (
+        f"Filament Tracker cannot find its card file at `{js_path}`, so the card "
+        'cannot load at all — the dashboard shows "Custom element doesn\'t exist: '
+        'filament-tracker-card".\n\n'
+        "The integration's `www/` folder did not get installed. In HACS, open "
+        "**Filament Tracker → ⋮ → Remove**, then add and install it again, and "
+        "restart Home Assistant. Adding a dashboard resource by hand will *not* "
+        "help while the file itself is missing."
+    )
+
+
+# Lovelace can be slower to load than we are. Retry the reconcile a few times
+# before giving up and asking the user to do it, rather than either spinning
+# forever or bothering them over a few seconds of startup ordering.
+_RESOURCE_MAX_ATTEMPTS = 4
+
+
+@callback
+def _schedule_resource_retry(hass: HomeAssistant, module_url: str) -> None:
+    """Try the reconcile again later when Lovelace wasn't ready yet."""
+    data = hass.data.setdefault(DOMAIN, {})
+    attempts = data.get("_resource_attempts", 0)
+
+    if attempts >= _RESOURCE_MAX_ATTEMPTS:
+        _LOGGER.warning(
+            "Filament Tracker: Lovelace's resource storage never became available; "
+            "asking the user to add %s by hand",
+            module_url,
+        )
+        _async_notify(
+            hass,
+            _manual_resource_message(
+                module_url,
+                "Home Assistant's dashboard resource storage was not available on "
+                "this restart.",
+            ),
+        )
+        return
+
+    if data.get("_resource_retry_scheduled"):
+        return
+    data["_resource_retry_scheduled"] = True
+
+    async def _retry(_arg) -> None:
+        data["_resource_retry_scheduled"] = False
+        try:
+            await _async_register_frontend(hass)
+        except Exception:  # noqa: BLE001 - a retry must never take HA down
+            _LOGGER.exception("Filament Tracker: frontend registration retry failed")
+
+    if hass.state is CoreState.running:
+        async_call_later(hass, 30, _retry)
+    else:
+        # Lovelace is set up during startup; by "started" its storage is there.
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _retry)
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
-    """Serve the card JS and register it as a Lovelace resource, once."""
-    if hass.data.get(DOMAIN, {}).get("_frontend_registered"):
-        _LOGGER.debug("Filament Tracker: frontend already registered, skipping")
-        return
+    """Serve the card JS, put it in index.html, and own the dashboard resource.
 
-    www_dir = pathlib.Path(__file__).parent / "www"
-    js_path = www_dir / CARD_FILENAME
-    if not await hass.async_add_executor_job(js_path.exists):
-        _LOGGER.error(
-            "Filament Tracker: card file missing at %s — the www/ folder didn't get "
-            "installed correctly. Reinstalling via HACS (Remove, then re-add) usually fixes this.",
-            js_path,
-        )
-        return
+    Three separate jobs with three separate lifetimes, which is why they no
+    longer share one "_frontend_registered" flag:
 
+    * the HTTP view and ``add_extra_js_url`` are process-wide and must happen
+      exactly once (registering the same route twice would raise);
+    * the Lovelace resource reconcile has to run on *every* call until it
+      verifiably succeeds, because that is where duplicate and stale entries get
+      cleaned up, and because Lovelace may simply not be loaded yet the first
+      time we ask.
+
+    Called from ``async_setup`` as well as ``async_setup_entry`` so the
+    ``<script type="module">`` is in the very first index.html Home Assistant
+    serves after a restart. Registering only from ``async_setup_entry`` left a
+    window where a browser that reconnected early got a page with no reference
+    to the card at all, and then sat there showing "Custom element doesn't
+    exist" until the next full reload.
+    """
+    data = hass.data.setdefault(DOMAIN, {})
     module_url = f"{CARD_URL_PATH}/{CARD_FILENAME}?v={CARD_VERSION}"
 
+    if not data.get("_view_registered"):
+        js_path = pathlib.Path(__file__).parent / "www" / CARD_FILENAME
+        if not await hass.async_add_executor_job(js_path.exists):
+            _LOGGER.error(
+                "Filament Tracker: card file missing at %s — the www/ folder didn't get "
+                "installed correctly. Reinstalling via HACS (Remove, then re-add) usually fixes this.",
+                js_path,
+            )
+            _async_notify(hass, _missing_file_message(js_path))
+            return
+
+        # Set the flag either way: a second attempt at the same route would only
+        # raise again, and a duplicate-route error must not stop the reconcile.
+        data["_view_registered"] = True
+        try:
+            hass.http.register_view(FilamentTrackerCardView(js_path))
+            _LOGGER.info(
+                "Filament Tracker: serving %s from %s as text/javascript",
+                FilamentTrackerCardView.url,
+                js_path,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Filament Tracker: could not register the HTTP view that serves %s",
+                FilamentTrackerCardView.url,
+            )
+
+    if not data.get("_extra_js_added"):
+        try:
+            from homeassistant.components.frontend import add_extra_js_url
+
+            add_extra_js_url(hass, module_url)
+            data["_extra_js_added"] = True
+            _LOGGER.info("Filament Tracker: registered frontend module %s", module_url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception(
+                "Filament Tracker: this Home Assistant version did not accept the "
+                "frontend module registration for %s",
+                module_url,
+            )
+            _async_notify(
+                hass,
+                _manual_resource_message(
+                    module_url,
+                    "this Home Assistant version rejected the integration's frontend "
+                    f"module registration ({type(err).__name__}: {err}).",
+                ),
+            )
+
+    if data.get("_resource_ok"):
+        return
+
     try:
-        hass.http.register_view(FilamentTrackerCardView(js_path))
-        _LOGGER.info(
-            "Filament Tracker: serving %s from %s as text/javascript (immutable)",
-            FilamentTrackerCardView.url,
-            js_path,
-        )
-
-        from homeassistant.components.frontend import add_extra_js_url
-
-        add_extra_js_url(hass, module_url)
-        await _async_register_lovelace_resource(hass, module_url)
-        _LOGGER.info("Filament Tracker: registered frontend module %s", module_url)
-    except Exception:
+        status = await _async_reconcile_lovelace_resource(hass, module_url)
+    except Exception as err:  # noqa: BLE001
         _LOGGER.exception(
-            "Filament Tracker: failed to register the card as a frontend resource. "
+            "Filament Tracker: failed to reconcile the card's dashboard resource. "
             "You can add it manually instead: Settings > Dashboards > Resources > "
             "Add Resource, URL %s, type JavaScript module.",
             module_url,
         )
+        _async_notify(
+            hass,
+            _manual_resource_message(
+                module_url,
+                "Home Assistant refused the automatic registration "
+                f"({type(err).__name__}: {err}).",
+            ),
+        )
         return
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN]["_frontend_registered"] = True
+    if status == _RESOURCE_OK:
+        data["_resource_ok"] = True
+        # Whatever went wrong on an earlier boot is fixed now — clear the note.
+        _async_dismiss_notify(hass)
+    elif status == _RESOURCE_YAML:
+        _async_notify(hass, _yaml_resource_message(module_url))
+    else:
+        # Only a genuine "Lovelace wasn't there" spends the retry budget, so an
+        # entry reload can't quietly exhaust it.
+        data["_resource_attempts"] = data.get("_resource_attempts", 0) + 1
+        _schedule_resource_retry(hass, module_url)
 
 
 async def _get_shared_data(hass: HomeAssistant) -> dict:
@@ -316,7 +585,14 @@ async def _save_and_refresh(hass: HomeAssistant, label: str) -> None:
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the four services once, against the domain rather than the entry.
+    """Register the card and the four services once, against the domain.
+
+    The frontend registration happens here — not only in ``async_setup_entry`` —
+    so the card's ``<script type="module">`` is present in the very first
+    index.html Home Assistant serves after a restart, and so the dashboard
+    resource list gets reconciled on every start even if the config entry is
+    slow, retrying, or (briefly) not loaded at all. It is idempotent and cannot
+    raise out of here; ``async_setup_entry`` calls it again.
 
     Services belong to the domain, not to a config entry, and
     ``single_config_entry`` means there is only ever one entry anyway. Doing this
@@ -328,6 +604,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     call rather than closing over a dict that a reload could orphan.
     """
     hass.data.setdefault(DOMAIN, {})
+
+    # Never let a frontend problem stop the integration (and therefore the
+    # services and the sensor) from setting up.
+    try:
+        await _async_register_frontend(hass)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Filament Tracker: frontend registration failed during setup")
 
     async def handle_add_spool(call: ServiceCall) -> None:
         shared = _require_shared(hass)
@@ -393,7 +676,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Filament Tracker from its (single) config entry."""
-    await _async_register_frontend(hass)
+    # Idempotent, and re-runs the dashboard resource reconcile if async_setup's
+    # attempt landed before Lovelace was ready. Must not abort the entry setup.
+    try:
+        await _async_register_frontend(hass)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Filament Tracker: frontend registration failed for the entry")
 
     await _get_shared_data(hass)
     domain_data = hass.data[DOMAIN]

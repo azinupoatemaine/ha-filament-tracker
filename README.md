@@ -17,13 +17,20 @@ setup.
    Nothing to fill in — it also registers the card as a Lovelace resource automatically.
 6. Edit any dashboard → **Add Card** → search "Filament Tracker" → Add. Done.
 
-The integration registers that resource itself — with a `?v=` cache-buster it keeps
-current on every restart — so you normally never touch this. Last-resort fallback
-only: if the card still isn't in the picker on your HA version, add it by hand once
-via Settings → Dashboards → ⋮ → Resources → Add Resource → URL
-`/filament_tracker_frontend/filament-tracker-card.js?v=18`, type **JavaScript
-module** — the integration rewrites that `?v=` to the current version on its next
-restart.
+The integration registers that resource itself, and on every restart it reconciles
+the resource list: any duplicate or stale `?v=` entry for the card is deleted and a
+single entry is left pointing at the current version. So you normally never touch
+this. Last-resort fallback only: if the card still isn't in the picker on your HA
+version, add it by hand once via Settings → Dashboards → ⋮ → Resources → Add
+Resource → URL `/filament_tracker_frontend/filament-tracker-card.js?v=19`, type
+**JavaScript module** — the integration rewrites that `?v=` to the current version
+on its next restart.
+
+If the card ever *can't* be registered automatically — YAML-mode dashboards, or a
+Home Assistant that refuses the registration — the integration raises a persistent
+notification containing the exact URL and the click-path above, rather than leaving
+you with a silent "Custom element doesn't exist" box. It clears itself once the
+automatic registration succeeds again.
 
 ## Zero-config by design
 

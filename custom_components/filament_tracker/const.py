@@ -14,13 +14,18 @@ DEFAULT_LOW_STOCK_THRESHOLD = 100.0
 OPT_LOW_STOCK_THRESHOLD = "low_stock_threshold"
 
 # Bump this whenever the card JS changes. It is the ?v= cache-buster on the
-# module URL, so the file itself is served immutable+long-cache (see
-# FilamentTrackerCardView): a new value here is a brand-new URL the browser has
-# never seen, which is what actually forces the re-fetch. Never edit the card
-# without bumping this.
-CARD_VERSION = "18"
+# module URL: a new value here is a brand-new URL the browser has never seen,
+# which is what actually forces the re-fetch. The file itself is served with a
+# one-hour cache (see FilamentTrackerCardView), so even a URL we *don't* rewrite
+# corrects itself within the hour. Never edit the card without bumping this.
+CARD_VERSION = "19"
 CARD_URL_PATH = f"/{DOMAIN}_frontend"
 CARD_FILENAME = "filament-tracker-card.js"
+
+# One stable id, so the "add the resource by hand" notification replaces itself
+# instead of stacking up one copy per restart — and so a later successful
+# registration can dismiss exactly it.
+CARD_NOTIFICATION_ID = f"{DOMAIN}_card_resource"
 
 # Auto-discovery: any ha-bambulab printer exposes sensors shaped like
 # sensor.<prefix>_ams_<unit>_tray_<slot> and sensor.<prefix>_external_spool.
