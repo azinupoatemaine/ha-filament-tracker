@@ -274,10 +274,14 @@ async def _async_reconcile_lovelace_resource(hass: HomeAssistant, module_url: st
             module_url,
         )
 
+    # Stored items carry the type under "type"; only the create/update *input*
+    # schema calls it "res_type". Check both so a correct entry isn't needlessly
+    # rewritten (and mislogged as "repointed") on every restart.
+    keeper_type = (keeper.get("type") or keeper.get("res_type")) if keeper else None
     if keeper is None:
         await resources.async_create_item({"res_type": "module", "url": module_url})
         _LOGGER.info("Filament Tracker: added dashboard resource %s", module_url)
-    elif keeper.get("url") != module_url or keeper.get("res_type") != "module":
+    elif keeper.get("url") != module_url or keeper_type != "module":
         # Read the old URL first: async_update_item edits the item in place.
         was = keeper.get("url")
         await resources.async_update_item(
