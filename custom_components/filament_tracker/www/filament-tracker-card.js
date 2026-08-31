@@ -459,6 +459,124 @@ const CARD_CSS = `
   [hidden] { display: none !important; }
 `;
 
+// ---------------------------------------------------------------------------
+// Config normalisation.
+//
+// setConfig() must NEVER throw. Home Assistant turns a throw from there into a
+// permanent error card — the dashboard paints "Configuration error" and nothing
+// ever re-renders it, on every load, until the config is hand-edited. That is a
+// far worse outcome than quietly ignoring one malformed option, especially for
+// options the rest of the card already copes with (the threshold and the AMS
+// size are read back through parseFloat, and an unknown language already falls
+// back to English in ftLang).
+//
+// So every option is coerced where a sensible reading exists and dropped —
+// falling back to its default — where it doesn't. Each problem is reported once
+// on the console so it is still discoverable.
+
+// The editor calls setConfig on every keystroke, so a bad value must not
+// produce a console line per render. Keyed by option *and* value, so fixing one
+// option and breaking another still gets reported.
+const FT_WARNED = new Set();
+function ftWarnOnce(token, message) {
+  if (FT_WARNED.has(token)) return;
+  FT_WARNED.add(token);
+  try {
+    console.warn("Filament Tracker card: " + message);
+  } catch (err) {
+    /* no console (some cast receivers) — the coercion still stands */
+  }
+}
+
+function ftShow(value) {
+  // JSON.stringify renders NaN and Infinity as "null", which would make the
+  // warning name a value the config never contained.
+  if (typeof value === "number" && !Number.isFinite(value)) return String(value);
+  try {
+    const shown = JSON.stringify(value);
+    return shown === undefined ? String(value) : shown;
+  } catch (err) {
+    return String(value);
+  }
+}
+
+// YAML and the editor's number inputs both hand us strings, so read through
+// Number() rather than demanding a real number. Returns undefined when there is
+// nothing usable in the value, which makes the card fall back to its default.
+function ftNumberOpt(value, key, min, minAllowed) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || (!minAllowed && n === min)) {
+    ftWarnOnce(
+      key + "=" + ftShow(value),
+      key + " should be a number " + (minAllowed ? ">= " : "> ") + min + "; ignoring " + ftShow(value) + " and using the default."
+    );
+    return undefined;
+  }
+  return n;
+}
+
+// Everything a person could reasonably have written for "off". Anything else —
+// including a bare `show_x:` with no value, which YAML reads as null — leaves
+// the section on, which is the card's default.
+const FT_FALSEY = new Set(["false", "0", "no", "off", "none", "null", ""]);
+function ftBoolOpt(value, key) {
+  if (typeof value === "boolean") return value;
+  if (value == null) return true;
+  const read = !FT_FALSEY.has(String(value).trim().toLowerCase());
+  ftWarnOnce(key + "=" + ftShow(value), key + " should be true or false; reading " + ftShow(value) + " as " + read + ".");
+  return read;
+}
+
+// Returns a config that is always safe to use. Every key is carried through
+// untouched except the handful validated below — Home Assistant injects its own
+// (type, grid_options, layout_options, view_layout, visibility) and other
+// modules add theirs (card_mod), and none of them are ours to judge.
+function ftNormalizeConfig(config) {
+  if (config == null) return {};
+  if (typeof config !== "object" || Array.isArray(config)) {
+    ftWarnOnce("config=" + ftShow(config), "the configuration should be a mapping of options; ignoring " + ftShow(config) + ".");
+    return {};
+  }
+
+  const out = Object.assign({}, config);
+
+  // An empty string is the editor's "field cleared", not a bad value.
+  if (out.low_stock_threshold == null || out.low_stock_threshold === "") {
+    delete out.low_stock_threshold;
+  } else {
+    const n = ftNumberOpt(out.low_stock_threshold, "low_stock_threshold", 0, true);
+    if (n === undefined) delete out.low_stock_threshold;
+    else out.low_stock_threshold = n;
+  }
+
+  if (out.ams_spool_size == null || out.ams_spool_size === "") {
+    delete out.ams_spool_size;
+  } else {
+    const n = ftNumberOpt(out.ams_spool_size, "ams_spool_size", 0, false);
+    if (n === undefined) delete out.ams_spool_size;
+    else out.ams_spool_size = n;
+  }
+
+  if (out.language != null) {
+    const lang = String(out.language);
+    if (lang !== "auto" && !I18N[lang]) {
+      ftWarnOnce(
+        "language=" + ftShow(out.language),
+        'language should be "auto" or one of: ' + Object.keys(I18N).join(", ") + "; ignoring " + ftShow(out.language) + " and following Home Assistant's own language."
+      );
+      delete out.language;
+    } else {
+      out.language = lang;
+    }
+  }
+
+  for (const key of Object.keys(out)) {
+    if (key.indexOf("show_") === 0) out[key] = ftBoolOpt(out[key], key);
+  }
+
+  return out;
+}
+
 class FilamentTrackerCard extends HTMLElement {
   constructor() {
     super();
@@ -490,48 +608,36 @@ class FilamentTrackerCard extends HTMLElement {
     return key ? this._t(key) : status;
   }
 
+  // Deliberately total: a bad option is coerced or dropped, never thrown over.
+  // See ftNormalizeConfig above for why. An absent or empty config ({}) is
+  // fine — every option has a default.
   setConfig(config) {
-    // Home Assistant turns anything thrown here into an error card, so reject a
-    // malformed config outright rather than limping on with a bad value. An
-    // absent or empty config ({}) is fine — every option has a default.
-    if (config === null || typeof config !== "object" || Array.isArray(config)) {
-      throw new Error("Filament Tracker card: configuration must be an object.");
-    }
-    const finiteNum = (v) => typeof v === "number" && Number.isFinite(v);
-    if (
-      config.low_stock_threshold != null &&
-      !(finiteNum(config.low_stock_threshold) && config.low_stock_threshold >= 0)
-    ) {
-      throw new Error("Filament Tracker card: low_stock_threshold must be a number that is 0 or more.");
-    }
-    if (
-      config.ams_spool_size != null &&
-      !(finiteNum(config.ams_spool_size) && config.ams_spool_size > 0)
-    ) {
-      throw new Error("Filament Tracker card: ams_spool_size must be a number greater than 0.");
-    }
-    if (config.language != null && config.language !== "auto" && !I18N[config.language]) {
-      throw new Error(
-        'Filament Tracker card: language must be "auto" or one of: ' + Object.keys(I18N).join(", ") + "."
-      );
-    }
-    for (const key of Object.keys(config)) {
-      if (key.indexOf("show_") === 0 && typeof config[key] !== "boolean") {
-        throw new Error("Filament Tracker card: " + key + " must be true or false.");
-      }
-    }
-
-    this._config = config || {};
+    this._config = ftNormalizeConfig(config);
     // Lovelace calls this again on every keystroke in the edit dialog's
     // preview, so the visible sections have to follow immediately — not wait
     // for the next hass push, which may be seconds away on a quiet system.
-    if (this._built) {
+    if (!this._built) return;
+    try {
       // The skeleton's labels are baked in at build time, so a language change
       // means rebuilding it. Everything that survives a rebuild lives on the
       // instance (sort, collapsed groups, active filter), not in the DOM.
       if (this._lang() !== this._builtLang && this._hass) this._buildSkeleton();
       this._applyVisibility();
       if (this._hass) this._updateAll();
+    } catch (err) {
+      // Same reasoning as the throw above, one step later: Home Assistant also
+      // replaces the card with an error card when setConfig fails part-way.
+      // Drop the render signature so the next state push retries.
+      this._renderSig = null;
+      this._logRenderFailure(err);
+    }
+  }
+
+  _logRenderFailure(err) {
+    try {
+      console.error("Filament Tracker card: render failed.", err);
+    } catch (e) {
+      /* no console — the card stays up either way, which is the point */
     }
   }
 
@@ -565,20 +671,32 @@ class FilamentTrackerCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    // With language: auto, the first hass is also what tells us which language
-    // to use — so a skeleton built before it may need rebuilding once.
-    if (!this._built || this._lang() !== this._builtLang) {
-      this._buildSkeleton();
+    try {
+      // With language: auto, the first hass is also what tells us which language
+      // to use — so a skeleton built before it may need rebuilding once.
+      if (!this._built || this._lang() !== this._builtLang) {
+        this._buildSkeleton();
+        this._renderSig = null;
+      }
+      // `hass` is set on every state change anywhere in Home Assistant; almost
+      // none concern this card. Re-render only when something it actually reads
+      // has moved — the spools sensor or a discovered AMS entity. setConfig (the
+      // editor's live preview) runs its own full pass and is unaffected.
+      //
+      // _renderSignature never returns null and _renderSig starts null, so the
+      // first hass after a build always falls through to a real render.
+      const sig = this._renderSignature(hass);
+      if (sig === this._renderSig) return;
+      this._renderSig = sig;
+      this._updateAll();
+    } catch (err) {
+      // hui-card replaces the whole card with an error card if this setter
+      // throws, so one unexpected row in the store would take the card down
+      // permanently. Swallow it and clear the signature, so the next state push
+      // retries instead of being skipped by the early return above.
       this._renderSig = null;
+      this._logRenderFailure(err);
     }
-    // `hass` is set on every state change anywhere in Home Assistant; almost
-    // none concern this card. Re-render only when something it actually reads
-    // has moved — the spools sensor or a discovered AMS entity. setConfig (the
-    // editor's live preview) runs its own full pass and is unaffected.
-    const sig = this._renderSignature(hass);
-    if (sig === this._renderSig) return;
-    this._renderSig = sig;
-    this._updateAll();
   }
 
   // Cheap fingerprint of everything _updateAll() looks at. sensor.filament_spools_db
@@ -615,11 +733,9 @@ class FilamentTrackerCard extends HTMLElement {
     return 8;
   }
 
-  // Sections (grid) dashboards: a wide, tall card — take the full 12 columns
-  // and let the height follow the content.
-  getGridOptions() {
-    return { columns: 12, rows: "auto", min_columns: 6 };
-  }
+  // No getGridOptions() on purpose. Sizing on a sections dashboard is the
+  // dashboard's call — `grid_options` in the card's own config already covers
+  // it, and hui-card lets that win over anything the card would return here.
 
   static getStubConfig() {
     return {};
@@ -1485,7 +1601,10 @@ if (!customElements.get("filament-tracker-card")) {
 // Visual config editor — shown in the card's "Edit" GUI, no YAML needed to customize.
 class FilamentTrackerCardEditor extends HTMLElement {
   setConfig(config) {
-    this._config = config || {};
+    // Normalised here too, so that the moment anyone touches a control the
+    // repaired values are what get written back — a config carrying a stale bad
+    // option repairs itself instead of staying wrong forever.
+    this._config = ftNormalizeConfig(config);
     this._render();
   }
 
@@ -1623,4 +1742,153 @@ if (!window.customCards.some((c) => c && c.type === "filament-tracker-card")) {
     documentationURL: "https://github.com/azinupoatemaine/ha-filament-tracker",
     preview: true,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Recovering a stuck "Configuration error" placeholder.
+//
+// When this module finishes loading after the dashboard has already painted,
+// Home Assistant has drawn a placeholder error card in its place. Normally that
+// is temporary: the frontend waits on customElements.whenDefined() and then
+// fires "ll-rebuild" at the placeholder, and hui-card swaps in the real card.
+//
+// That recovery runs inside the frontend's own rebuild pass, which means *any*
+// other custom module that throws during the same pass takes it down with it —
+// a card-mod build patching a partial-panel-resolver it no longer matches is
+// the common one. When that happens the placeholder is never swapped and the
+// red box stays until the page is reloaded by hand.
+//
+// So the card performs the same recovery itself, from outside that pass. It is
+// deliberately narrow: it only ever acts on a hui-card whose own config names
+// this card and which is currently showing an error card, it goes through
+// hui-card's public load(), it gives up after a few tries per card, and every
+// step is wrapped — a failure in here is swallowed rather than surfaced.
+
+const FT_CARD_TAG = "filament-tracker-card";
+const FT_CARD_TYPES = new Set(["custom:filament-tracker-card", "filament-tracker-card"]);
+// Per hui-card element, not global: navigating to another view builds new ones,
+// and those deserve their own budget.
+const FT_HEAL_TRIES = new WeakMap();
+const FT_HEAL_MAX_TRIES = 3;
+// Spread out rather than repeated, to cover both orders — this module landing
+// before the dashboard paints, and well after it.
+const FT_HEAL_DELAYS = [0, 150, 400, 900, 2000, 4000, 8000];
+let ftHealTimers = [];
+
+// Walk the document and every open shadow root under it. Dashboard cards sit
+// several shadow roots deep (and inside hui-section on a sections view), so a
+// plain document.querySelectorAll cannot see them. Bounded so that a very large
+// or pathological DOM cannot stall a pass.
+function ftDeepCollect(match) {
+  const found = [];
+  const roots = [document];
+  let scanned = 0;
+  while (roots.length && scanned < 800) {
+    const root = roots.shift();
+    scanned++;
+    let nodes;
+    try {
+      nodes = root.querySelectorAll("*");
+    } catch (err) {
+      continue;
+    }
+    for (const node of nodes) {
+      try {
+        if (node.shadowRoot) roots.push(node.shadowRoot);
+        if (match(node)) found.push(node);
+      } catch (err) {
+        /* an element that throws on property access is simply skipped */
+      }
+    }
+  }
+  return found;
+}
+
+function ftIsOurConfig(config) {
+  return !!config && typeof config === "object" && FT_CARD_TYPES.has(String(config.type));
+}
+
+// hui-card appends the card it built as a light-DOM child of itself. Stuck ==
+// that child is an error card rather than ours. An empty hui-card is NOT
+// treated as stuck: that is also how the frontend represents a card hidden by a
+// visibility condition, and rebuilding those would be a pointless loop.
+function ftIsStuck(huiCard) {
+  if (huiCard.querySelector(FT_CARD_TAG)) return false;
+  return !!huiCard.querySelector("hui-error-card");
+}
+
+function ftFireRebuild(el) {
+  el.dispatchEvent(new CustomEvent("ll-rebuild", { bubbles: true, composed: true, detail: {} }));
+}
+
+function ftHealPass() {
+  // Nothing to swap in yet — the placeholder is still legitimate.
+  if (!customElements.get(FT_CARD_TAG)) return;
+
+  const stuck = ftDeepCollect(
+    (node) => node.localName === "hui-card" && ftIsOurConfig(node.config) && ftIsStuck(node)
+  );
+  for (const huiCard of stuck) {
+    const tries = FT_HEAL_TRIES.get(huiCard) || 0;
+    if (tries >= FT_HEAL_MAX_TRIES) continue;
+    FT_HEAL_TRIES.set(huiCard, tries + 1);
+    try {
+      if (typeof huiCard.load === "function") {
+        // Public API: rebuilds from hui-card's own config and re-applies hass,
+        // layout and preview — exactly what the ll-rebuild handler does.
+        huiCard.load();
+      } else {
+        ftFireRebuild(huiCard.querySelector("hui-error-card"));
+      }
+    } catch (err) {
+      /* leave it be — a manual reload still works */
+    }
+  }
+
+  // Frontends predating the hui-card wrapper put the placeholder straight into
+  // the view, where the error card's own config is the only thing linking back
+  // to the card config that failed.
+  const orphans = ftDeepCollect((node) => {
+    if (node.localName !== "hui-error-card") return false;
+    const parent = node.parentElement;
+    if (parent && parent.localName === "hui-card") return false;
+    const cfg = node._config;
+    return !!cfg && ftIsOurConfig(cfg.origConfig);
+  });
+  for (const errorCard of orphans) {
+    const tries = FT_HEAL_TRIES.get(errorCard) || 0;
+    if (tries >= FT_HEAL_MAX_TRIES) continue;
+    FT_HEAL_TRIES.set(errorCard, tries + 1);
+    try {
+      ftFireRebuild(errorCard);
+    } catch (err) {
+      /* same */
+    }
+  }
+}
+
+function ftScheduleHeal() {
+  for (const timer of ftHealTimers) clearTimeout(timer);
+  ftHealTimers = FT_HEAL_DELAYS.map((delay) =>
+    setTimeout(() => {
+      try {
+        ftHealPass();
+      } catch (err) {
+        /* a broken pass must never break the card */
+      }
+    }, delay)
+  );
+}
+
+try {
+  if (typeof document !== "undefined" && typeof window !== "undefined") {
+    ftScheduleHeal();
+    // Navigating between dashboards is when the aborted-rebuild-pass problem
+    // actually bites, so re-arm on Home Assistant's own navigation events. The
+    // per-element try budget keeps this bounded however often they fire.
+    window.addEventListener("location-changed", ftScheduleHeal);
+    window.addEventListener("popstate", ftScheduleHeal);
+  }
+} catch (err) {
+  /* no DOM (a bundler, a test) — the card class is still exported above */
 }

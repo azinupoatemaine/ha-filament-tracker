@@ -21,7 +21,7 @@ The integration registers that resource itself — with a `?v=` cache-buster it 
 current on every restart — so you normally never touch this. Last-resort fallback
 only: if the card still isn't in the picker on your HA version, add it by hand once
 via Settings → Dashboards → ⋮ → Resources → Add Resource → URL
-`/filament_tracker_frontend/filament-tracker-card.js?v=17`, type **JavaScript
+`/filament_tracker_frontend/filament-tracker-card.js?v=18`, type **JavaScript
 module** — the integration rewrites that `?v=` to the current version on its next
 restart.
 

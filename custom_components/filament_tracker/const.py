@@ -18,7 +18,7 @@ OPT_LOW_STOCK_THRESHOLD = "low_stock_threshold"
 # FilamentTrackerCardView): a new value here is a brand-new URL the browser has
 # never seen, which is what actually forces the re-fetch. Never edit the card
 # without bumping this.
-CARD_VERSION = "17"
+CARD_VERSION = "18"
 CARD_URL_PATH = f"/{DOMAIN}_frontend"
 CARD_FILENAME = "filament-tracker-card.js"
 
