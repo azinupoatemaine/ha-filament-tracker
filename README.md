@@ -22,7 +22,7 @@ the resource list: any duplicate or stale `?v=` entry for the card is deleted an
 single entry is left pointing at the current version. So you normally never touch
 this. Last-resort fallback only: if the card still isn't in the picker on your HA
 version, add it by hand once via Settings → Dashboards → ⋮ → Resources → Add
-Resource → URL `/filament_tracker_frontend/filament-tracker-card.js?v=20`, type
+Resource → URL `/filament_tracker_frontend/filament-tracker-card.js?v=21`, type
 **JavaScript module** — the integration rewrites that `?v=` to the current version
 on its next restart.
 
