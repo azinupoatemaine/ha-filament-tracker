@@ -1729,9 +1729,67 @@ class FilamentTrackerCardEditor extends HTMLElement {
   }
 }
 
-if (!customElements.get("filament-tracker-card-editor")) {
-  customElements.define("filament-tracker-card-editor", FilamentTrackerCardEditor);
+// ---------------------------------------------------------------------------
+// Surviving a swap of the global custom element registry.
+//
+// Home Assistant's app bundle carries the scoped-custom-element-registry
+// polyfill, and installing it does not wrap the global registry — it replaces
+// it outright:
+//
+//   Object.defineProperty(window, "customElements",
+//     { value: new CustomElementRegistry, configurable: true, writable: true })
+//
+// The replacement starts empty and never consults the native registry it
+// displaced: its whenDefined() reads its own map and nothing else. So anything
+// defined before that line does not merely load early, it vanishes.
+// customElements.get() returns undefined for an element that was defined
+// without error, the frontend's whenDefined() -> "ll-rebuild" recovery is
+// waiting on a promise that can now never resolve, and the card is a permanent
+// "Custom element doesn't exist" box.
+//
+// This module is imported from index.html, which starts it before app.js has
+// finished evaluating — so it loses that race whenever it is served fast
+// enough, and a warm HTTP cache alone is enough to do it. That is why the card
+// fails on a hard refresh and comes back after a reload: the two loads resolve
+// the race differently.
+//
+// The answer is not to deliberately load late, which only trades one race for
+// another, but to notice the swap and define again on whichever registry is
+// current. Re-defining is safe rather than a duplicate-registration error: the
+// polyfill's define() looks the name up in the native registry first and reuses
+// the class it finds there, so it adopts this one instead of registering a
+// second.
+const FT_DEFINITIONS = [
+  ["filament-tracker-card", FilamentTrackerCard],
+  ["filament-tracker-card-editor", FilamentTrackerCardEditor],
+];
+// The registry object these were last successfully defined into, compared by
+// identity — a swap is a different object, not a changed one.
+let ftDefinedInto = null;
+
+function ftEnsureDefined() {
+  // A bare global read, deliberately: it resolves afresh every call, so it sees
+  // a registry that has been swapped out from under this module. Caching it
+  // once would defeat the entire point of this function.
+  const registry = typeof customElements !== "undefined" ? customElements : undefined;
+  if (!registry) return false;
+  // Same registry as last time and it still holds the card: the common case,
+  // and it must stay cheap because the heal schedule calls this repeatedly.
+  if (registry === ftDefinedInto && registry.get("filament-tracker-card")) return true;
+  for (const [tag, cls] of FT_DEFINITIONS) {
+    try {
+      if (!registry.get(tag)) registry.define(tag, cls);
+    } catch (err) {
+      // A second copy of this module beat us to the name, or the registry
+      // refuses a name it already holds. Either way the element exists, which
+      // is the only thing this needs to be true.
+    }
+  }
+  ftDefinedInto = registry;
+  return !!registry.get("filament-tracker-card");
 }
+
+ftEnsureDefined();
 
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c && c.type === "filament-tracker-card")) {
@@ -1893,8 +1951,16 @@ function ftAdopt(huiCard) {
 }
 
 function ftHealPass() {
-  // Nothing to swap in yet — the placeholder is still legitimate.
-  if (!customElements.get(FT_CARD_TAG)) return;
+  // Re-assert the definition first. The registry this module defined into at
+  // evaluation time may since have been replaced wholesale (see
+  // ftEnsureDefined), in which case every placeholder on the page is waiting on
+  // a whenDefined() that resolves the moment the name is registered again — so
+  // this one line is usually the entire repair, and the walk below finds
+  // nothing left to do.
+  //
+  // If it still is not defined, the placeholder is legitimate and there is
+  // nothing to swap in yet.
+  if (!ftEnsureDefined()) return;
 
   const stuck = ftDeepCollect(
     (node) => node.localName === "hui-card" && ftIsOurConfig(node.config) && ftIsStuck(node)
