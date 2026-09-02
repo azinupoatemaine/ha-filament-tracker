@@ -1752,17 +1752,35 @@ if (!window.customCards.some((c) => c && c.type === "filament-tracker-card")) {
 // is temporary: the frontend waits on customElements.whenDefined() and then
 // fires "ll-rebuild" at the placeholder, and hui-card swaps in the real card.
 //
-// That recovery runs inside the frontend's own rebuild pass, which means *any*
-// other custom module that throws during the same pass takes it down with it —
-// a card-mod build patching a partial-panel-resolver it no longer matches is
-// the common one. When that happens the placeholder is never swapped and the
-// red box stays until the page is reloaded by hand.
+// That whenDefined() promise is armed exactly once, when the placeholder is
+// built, and it is the only thing that ever swaps it. Anything that stops the
+// resulting ll-rebuild from landing leaves the red box there for good, because
+// nothing re-arms it: a listener registered { once: true } that some other
+// module has already consumed, a placeholder that was moved between parents
+// after the listener was attached, or a rebuild that starts and then aborts.
 //
-// So the card performs the same recovery itself, from outside that pass. It is
-// deliberately narrow: it only ever acts on a hui-card whose own config names
-// this card and which is currently showing an error card, it goes through
-// hui-card's public load(), it gives up after a few tries per card, and every
-// step is wrapped — a failure in here is swallowed rather than surfaced.
+// So the card performs the same recovery itself, on a timer, from outside that
+// one-shot path. It is deliberately narrow: it only ever acts on a hui-card
+// whose own config names this card and which is not currently showing this
+// card, it gives up after a few tries per card, and every step is wrapped — a
+// failure in here is swallowed rather than surfaced.
+//
+// Two levels, in order of how much they assume:
+//
+//   1. hui-card.load(), the public API, which rebuilds from the hui-card's own
+//      config and re-applies hass, layout and preview. Correct when it works.
+//
+//   2. Building the element here and putting it in place ourselves, when (1)
+//      ran and the card still is not on screen. load() is not atomic — it
+//      drops every existing child *before* re-appending, and the re-append is
+//      skipped entirely if the hui-card has no hass yet — so a load() that
+//      gets part-way leaves an empty or still-broken hui-card behind, which no
+//      further frontend event will ever revisit.
+//
+// Level 2 writes hui-card's private _element/_elementConfig as well as the DOM.
+// That is not decoration: hui-card pushes each new hass onto _element, so a
+// swap that only touches the DOM would render once and then freeze, which is a
+// worse failure than the red box because it looks like it worked.
 
 const FT_CARD_TAG = "filament-tracker-card";
 const FT_CARD_TYPES = new Set(["custom:filament-tracker-card", "filament-tracker-card"]);
@@ -1809,16 +1827,69 @@ function ftIsOurConfig(config) {
 }
 
 // hui-card appends the card it built as a light-DOM child of itself. Stuck ==
-// that child is an error card rather than ours. An empty hui-card is NOT
-// treated as stuck: that is also how the frontend represents a card hidden by a
-// visibility condition, and rebuilding those would be a pointless loop.
+// that child is not ours.
+//
+// An empty hui-card needs care, because that is also how the frontend
+// represents a card hidden by a visibility condition, and rebuilding those
+// would be a pointless loop. The two are told apart by hui-card's _element,
+// which is the card it believes it built whether or not that card is in the
+// DOM at the moment:
+//
+//   - _element is our card: hidden, or mid-flight. Either way hui-card's own
+//     next hass push re-appends it, so this must be left alone.
+//   - _element is missing or is an error card: nothing is going to put our
+//     card there, because as far as hui-card is concerned it never built one.
 function ftIsStuck(huiCard) {
   if (huiCard.querySelector(FT_CARD_TAG)) return false;
-  return !!huiCard.querySelector("hui-error-card");
+  if (huiCard.querySelector("hui-error-card")) return true;
+  if (huiCard.firstElementChild) return false;
+  const built = huiCard._element;
+  return !built || built.localName !== FT_CARD_TAG;
 }
 
 function ftFireRebuild(el) {
   el.dispatchEvent(new CustomEvent("ll-rebuild", { bubbles: true, composed: true, detail: {} }));
+}
+
+// Level 2: build the card and put it in place without asking the frontend to
+// do anything. Returns true only if our element is on screen afterwards.
+//
+// hass is required rather than optional. Without it the card renders an empty
+// skeleton and hui-card would not have appended anything either, so there is
+// nothing to gain by going early — a later pass will find the hui-card still
+// stuck and try again, by which time hass is normally set.
+function ftAdopt(huiCard) {
+  const config = huiCard.config;
+  const hass = huiCard.hass;
+  if (!ftIsOurConfig(config) || !hass) return false;
+
+  const card = document.createElement(FT_CARD_TAG);
+  // setConfig is total (see ftNormalizeConfig), so this does not throw for any
+  // config the dashboard could be holding. Nothing here is guarded on its own:
+  // the caller wraps the whole call, and a half-done adopt leaves the hui-card
+  // stuck, which is what it already was.
+  card.setConfig(config);
+  card.hass = hass;
+  card.layout = huiCard.layout;
+  card.preview = huiCard.preview;
+  // The name hui-card still sets for cards written against older frontends.
+  card.editMode = huiCard.preview;
+
+  // Replace the children rather than appending beside them, so the error card
+  // (or a stale half-built one) actually goes away.
+  while (huiCard.lastChild) huiCard.removeChild(huiCard.lastChild);
+  huiCard.appendChild(card);
+
+  // Adopt it into hui-card's own bookkeeping. _element is what receives every
+  // subsequent hass push and layout/preview change; _elementConfig is what
+  // hui-card diffs the next config against to decide between a cheap
+  // setConfig() and a full rebuild. Leaving either pointing at the discarded
+  // error card is what would turn this into a card that renders once and then
+  // silently stops updating.
+  huiCard._element = card;
+  huiCard._elementConfig = config;
+
+  return !!huiCard.querySelector(FT_CARD_TAG);
 }
 
 function ftHealPass() {
@@ -1838,8 +1909,17 @@ function ftHealPass() {
         // layout and preview — exactly what the ll-rebuild handler does.
         huiCard.load();
       } else {
-        ftFireRebuild(huiCard.querySelector("hui-error-card"));
+        const errorCard = huiCard.querySelector("hui-error-card");
+        if (errorCard) ftFireRebuild(errorCard);
       }
+    } catch (err) {
+      /* fall through to the direct swap below, which needs none of this */
+    }
+    // Whether load() threw, did nothing, or ran but bailed out before
+    // re-appending, the only thing that settles it is looking. Anything still
+    // stuck at this point is not going to be fixed by the frontend.
+    try {
+      if (ftIsStuck(huiCard)) ftAdopt(huiCard);
     } catch (err) {
       /* leave it be — a manual reload still works */
     }
