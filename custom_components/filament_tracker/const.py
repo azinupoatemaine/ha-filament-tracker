@@ -18,7 +18,7 @@ OPT_LOW_STOCK_THRESHOLD = "low_stock_threshold"
 # which is what actually forces the re-fetch. The file itself is served with a
 # one-hour cache (see FilamentTrackerCardView), so even a URL we *don't* rewrite
 # corrects itself within the hour. Never edit the card without bumping this.
-CARD_VERSION = "19"
+CARD_VERSION = "20"
 CARD_URL_PATH = f"/{DOMAIN}_frontend"
 CARD_FILENAME = "filament-tracker-card.js"
 
